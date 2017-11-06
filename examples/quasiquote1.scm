@@ -1,0 +1,6 @@
+(define x 0)
+(define y (lambda() `(,(set! x (+ x 1)) 3 )))
+(display (y))
+(display x)
+(display (y))
+(display x)

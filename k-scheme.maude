@@ -1,0 +1,3753 @@
+--- add defun syntax for internal defines
+
+--- move lookup of mbuiltin from list creation to
+--- symbol lookup so that keywords are legitimate
+--- variables again.  Or, make sure keywords are only
+--- at beginning of forms
+
+--- Note that
+--- some illegal Scheme programs produce what
+--- amounts to a stack dump rather than a nice error message
+--- this is an area of ongoing work
+
+--- no proper error messages for passing two few args
+--- to a variable arg procedure
+
+*****************************************************************
+*** Original LISP implementation,
+*** LISB, is copyright 2005 by Steve Lauterburg and Andrew Lenharth
+*** used with permission.
+*** Scheme updates copyright 2007 by Patrick Meredith
+*** macro support copyright 2007 by Mark Hills
+*****************************************************************
+
+
+*****************************************************************
+*** Scheme Syntax ***********************************************
+*****************************************************************
+
+*****************************************************************
+mod NAME is
+  protecting QID .
+  sorts Name BuiltInName .
+  subsort Qid < Name .
+  subsort BuiltInName < Name .
+
+  ops nil nilVec nilStr #t #f unspecified &rest : -> BuiltInName .
+
+  op Name2String : Name -> String .
+
+  var Q : Qid .
+  eq Name2String(Q) = string(Q) .
+
+  ***
+  *** special symbols
+  ***
+  eq Name2String(nil) = "()" .
+  eq Name2String(nilVec) = "#()" .
+  eq Name2String(nilStr) = "\"\"" .
+  eq Name2String(#t) = "#t" .
+  eq Name2String(#f) = "#f" .
+  eq Name2String(unspecified) = "#<unspecified>" .
+  eq Name2String(&rest) = "." .
+endm
+
+*****************************************************************
+mod NAME-LIST is
+  including NAME .
+  protecting NAT .
+
+  sort NameList .
+  subsort Name < NameList .
+  op `(`) : -> NameList .
+  op _,_ : NameList NameList -> NameList [assoc id: ()] .
+
+  op length : NameList -> Nat .
+  vars X X' : Name . var XL : NameList .
+  eq length(X,X',XL) = 1 + length(X',XL) .
+  eq length(X) = 1 .
+  eq length(()) = 0 .
+
+  op NameList2String : NameList -> String .
+  eq NameList2String(()) = "" .
+  eq NameList2String(X) = Name2String(X) . 
+  eq NameList2String(X, XL) 
+   = Name2String(X) + " " + NameList2String(XL) [owise] .
+endm
+
+
+*****************************************************************
+mod WRAPPED-STRING is
+  including STRING .
+  sort WrappedString .
+  op {_} : String -> WrappedString .
+endm
+
+mod WRAPPED-CHAR is
+  including STRING .
+  sort WrappedChar .
+  op #\_ : Char -> WrappedChar .
+endm
+
+*****************************************************************
+mod GENERIC-EXP-SYNTAX is
+  including NAME-LIST .
+  including INT .
+  including WRAPPED-STRING .
+  including WRAPPED-CHAR .
+
+  sort List Item ItemList Exp ExpList .
+
+  subsorts Name Int WrappedChar WrappedString List < Exp 
+           < Item < ItemList .
+  subsorts Exp NameList < ExpList .
+
+  ***
+  *** constructors for ItemLists, ExpLists and Lists
+  ***
+  op __ : ItemList ItemList -> ItemList [assoc] .
+  op _,_ : ExpList ExpList -> ExpList [ditto] .
+  op [_] : ItemList -> List .
+  op [_._] : ItemList Exp -> List .
+  op [._] : Exp -> List .
+  op [] : -> List .
+  op #[_] : ItemList -> Exp .
+  op #[] : -> Exp .
+
+endm
+
+*****************************************************************
+mod SHORTCUT-SYNTAX is
+  including GENERIC-EXP-SYNTAX .
+  var E : Exp .
+  
+  op $_ : Exp -> Exp .
+  eq $ E = ['quote E] .
+
+  op !_ : Exp -> Exp .
+  eq ! E = ['quasiquote E] .
+
+  op !!_ : Exp -> Exp .
+  eq !! E = ['unquote E] .
+
+  op !@_ : Exp -> Exp .
+  eq !@ E = ['unquote-splicing E] .
+endm
+
+*****************************************************************
+mod K-SCHEME-SYNTAX is
+  including GENERIC-EXP-SYNTAX .
+  including SHORTCUT-SYNTAX .
+endm
+
+
+*****************************************************************
+*** SCHEME Semantics ********************************************
+*****************************************************************
+
+*****************************************************************
+
+*****************************************************************
+mod VALUE is
+  sort Value .
+  op nothing : -> Value .
+endm
+
+*****************************************************************
+mod VALUE-LIST is
+  including VALUE .
+  protecting INT .
+
+  sort ValueList .
+  subsorts Value < ValueList .
+  op nill : -> ValueList .
+  op _,_ : ValueList ValueList -> ValueList [assoc id: nill] .
+
+  op firstN : ValueList Nat -> ValueList .
+  op restN : ValueList Nat -> ValueList .
+  op length : ValueList -> Nat .
+
+  vars V V' : Value . var VL : ValueList . var N : NzNat .
+  eq firstN((V,VL), N) = V,firstN(VL, (N - 1)) .
+  eq firstN(VL, 0) = nill .
+  eq restN((V,VL), N) = restN(VL, N - 1) .
+  eq restN(VL, 0) = VL .
+
+  eq length(V,VL) = 1 + length(VL) .
+  eq length(nill) = 0 .
+endm
+ 
+*****************************************************************
+mod COMPUTATION is
+  protecting GENERIC-EXP-SYNTAX .
+  protecting VALUE-LIST .
+
+  sorts Computation ComputationItem .
+  subsort ComputationItem < Computation .
+  op stop : -> Computation .
+  op _->_ : Computation Computation -> Computation [assoc id: stop] .
+
+
+  op expList : ExpList -> ComputationItem .
+  op valList : ValueList -> ComputationItem .
+endm
+
+
+*****************************************************************
+mod OUTPUT is
+  including STRING .
+  sorts Output .
+  subsorts String < Output .
+  op none : -> Output .
+  op _:_ : Output Output -> Output [assoc id: none] .
+endm
+
+*****************************************************************
+mod LOCATION is
+  including INT .
+  sort Location .
+  sort LocationList .
+  subsort Location < LocationList .
+
+  op loc : Nat -> Location .
+  op nill : -> LocationList .
+  op _,_ : LocationList LocationList -> LocationList 
+          [assoc id: nill] .
+  op locs : Nat Nat -> LocationList .
+
+  vars N # : Nat .
+  eq locs(N, 0) = nill .
+  eq locs(N, #) = loc(N), locs(N + 1, # - 1) .
+endm
+
+****************************************************************
+***
+*** used to implement strings and vectors
+***
+mod LOCATION-ARRAY is
+  including LOCATION .
+  protecting INT .
+  
+  sort LocationArray .
+  op nill : -> LocationArray .
+  op [_;_] : Nat Location -> LocationArray .
+  op __ : LocationArray LocationArray -> LocationArray 
+         [assoc comm id: nill] . 
+endm
+
+*****************************************************************
+mod ENVIRONMENT is
+  including NAME-LIST .
+  including LOCATION .
+  sort Env .
+  op empty : -> Env .
+  op [_,_] : Name Location -> Env .
+  op __ : Env Env -> Env [assoc comm id: empty] .
+  op _[_] : Env Name -> Location .
+  op _[_<-_] : Env Name Location -> Env .
+  var X : Name .  var Env : Env .  vars L L' : Location .
+
+  eq ([X,L] Env)[X] = L .
+  eq ([X,L] Env)[X <- L'] = ([X,L'] Env) .
+  eq Env[X <- L] = (Env [X,L]) [owise] .
+endm
+
+ 
+*****************************************************************
+mod CONS-CELL is
+  sort ConsCell .
+  including LOCATION .
+  op {_._} : Location Location -> ConsCell .
+endm
+
+*****************************************************************
+mod STORE is
+  including LOCATION .
+  including VALUE-LIST .
+  
+  sort Store .
+  op empty : -> Store .
+  op [_,_] : Location Value -> Store .
+  op __ : Store Store -> Store [assoc comm id: empty] .
+  op _[_] : Store Location -> Value .
+  op _[_<-_] : Store Location Value -> Store .
+  var L : Location .  var Mem : Store .  vars Pv Pv' : Value .
+
+  eq ([L,Pv] Mem)[L] = Pv .
+  eq ([L,Pv] Mem)[L <- Pv'] = ([L,Pv'] Mem) .
+  eq Mem[L <- Pv'] = (Mem [L,Pv']) [owise] .
+endm
+
+
+*****************************************************************
+mod STATE is
+  sorts PLStateAttribute PLState .
+  subsort PLStateAttribute < PLState .
+  including ENVIRONMENT .
+  including STORE .
+  including COMPUTATION .
+  including OUTPUT .
+  including K-SCHEME-SYNTAX .
+  op empty : -> PLState .
+  op __ : PLState PLState -> PLState [assoc comm id: empty] .
+  op k : Computation -> PLStateAttribute .
+  op mem : Store -> PLStateAttribute .
+  op nextLoc : Nat -> PLStateAttribute .
+  op env : Env -> PLStateAttribute .
+  op globalenv : Env -> PLStateAttribute .
+  op output : Output -> PLStateAttribute .
+  op program : ExpList -> PLStateAttribute .
+  op fbuiltins : NameList -> PLStateAttribute .
+  op mbuiltins : NameList -> PLStateAttribute .
+  op unquotes : ValueList -> PLStateAttribute .
+endm
+
+****************************************************************
+mod INTTOSTRING is
+   protecting CONVERSION .
+   protecting INT .
+   protecting STRING .
+
+   op inttoDisplayout : Int -> String .
+   var N : Int . var S : String .
+   eq inttoDisplayout(N) = string(N,10) .
+endm
+
+*****************************************************************
+mod HELPING-OPERATIONS is
+  including CONS-CELL .
+  including NAME-LIST .
+  including GENERIC-EXP-SYNTAX .
+  including STATE .
+  including LOCATION-ARRAY .
+  var X X' : Name .  vars E E' : Exp .  var El : ExpList .
+  var K : Computation .  vars V : Value .  var VL : ValueList .
+  var XL : NameList .  var L : Location .  var Ll : LocationList .
+  vars Env Env' GEnv GEnv' : Env .  var Mem : Store .  var N : Nat .
+  var B : Bool .
+
+  ***
+  *** Only used to flag errors due to applying not applicable types
+  ***
+  sorts Applicable QQForm .
+  subsort Applicable QQForm < Value .
+  
+
+  ***
+  *** value types
+  ***
+  op int : Int -> Value .
+  op char : Char -> Value .
+  op displayout : String -> Value .
+  op symbol : Name -> Value .
+  op cell : ConsCell -> QQForm .
+  op fbuiltin : Name -> Applicable .
+  op mbuiltin : Name -> Applicable .
+  op fclosure : NameList ValueList Env -> Applicable .
+  op continuation : Computation Env -> Applicable .
+  op vals : ValueList -> Value .
+  op vector : LocationArray Nat -> QQForm .
+  op string : LocationArray Nat -> Value .
+  op environment : Env Env -> Value .
+
+  eq k(valList(VL) -> valList(V) -> K) = k(valList(V, VL) -> K) .
+  eq k(valList(V) -> valList(VL) -> K) = k(valList(VL, V) -> K) .
+
+  ***
+  *** usability error messages
+  *** to use replace the whole k attribute
+  *** with the operator (more can be replaced as
+  *** well because these errors are terminal, but
+  *** it is imperative that k be removed or execution 
+  *** may continue, perhaps exceptions should be moved
+  *** to be continuation items)
+  ***
+
+  ***
+  *** unbound variables
+  *** the Name argument is the name of the unbound variable
+  ***
+  op UnboundVariable : Name -> PLStateAttribute .
+
+  ***
+  *** wrong type to apply
+  *** used when the first value in a pair that is
+  *** being evaluated is not applicable, such
+  *** as an int or string
+  ***
+  op WrongTypeToApply : Value -> PLStateAttribute .
+
+  ***
+  *** wrong number of arguments to a function
+  ***
+  op WrongNumberOfArgs : -> PLStateAttribute .
+
+  ***
+  *** index out of range for vector or string operations
+  *** the Int argument is used to report the attempted
+  *** index
+  ***
+  op IndexOutOfRange : Int -> PLStateAttribute .
+
+  ***
+  *** syntactic keywords cannot be bound or assigned to variables
+  ***
+  op CannotBindSyntax : -> PLStateAttribute .
+
+  ***
+  *** environment restoration
+  ***
+  op kenv : Env -> ComputationItem .
+  eq k(valList(VL) -> kenv(Env) -> K) env(Env')  = k(valList(VL) -> K) env(Env) .
+
+  ***
+  *** local AND global environment restoration
+  *** currently only used for eval
+  ***
+  op kenv2 : Env Env -> ComputationItem .
+  eq k(valList(VL) -> kenv2(Env, GEnv) -> K) env(Env') globalenv(GEnv') 
+   = k(valList(VL) -> K) env(Env) globalenv(GEnv) .
+  
+   
+ 
+  ***
+  *** used when the value on the top of the continuation should 
+  *** be ignored
+  ***
+  op discard : -> ComputationItem .
+  eq k(valList(V) -> discard -> K) = k(K) .
+
+  ***
+  *** regular binds and assignments
+  ***
+  op bindTo_ : NameList -> ComputationItem .
+  ---eq k(valList(mbuiltin(X),VL) -> bindTo(X',XL) -> K) mem(Mem)
+  ---   env(Env) nextLoc(N)
+  --- = CannotBindSyntax .
+  eq k(valList(V,VL) -> bindTo(X,XL) -> K) mem(Mem)
+     env(Env) nextLoc(N)
+   = k(valList(VL) -> bindTo(XL) -> K) mem(Mem[loc(N),V])
+     env(Env[X <- loc(N)]) nextLoc(N + 1) [owise] .
+  eq k(valList(nill) -> bindTo () -> K) = k(K) [owise] .
+  eq k(valList(nill) -> bindTo nil -> K) = k(K) [owise] .
+  
+  ***
+  *** we assume that binding too few or two many arguments
+  *** to the given NameList represents a situation
+  *** in which too many or two few arguments are passed
+  *** to a function.  Currently this is true
+  ***
+  eq k(valList(nill) -> bindTo(XL) -> K) =
+     WrongNumberOfArgs [owise] .
+  eq k(valList(VL) -> bindTo () -> K) = 
+     WrongNumberOfArgs [owise] .
+  eq k(valList(VL) -> bindTo nil -> K) = 
+     WrongNumberOfArgs [owise] .
+
+  ***
+  *** used for letrec, initializing the variables
+  ***
+  op nilBindTo_ : NameList -> ComputationItem .
+  eq k(nilBindTo(X,XL) -> K) mem(Mem)
+     env(Env) nextLoc(N)
+   = k(nilBindTo(XL) -> K) mem(Mem)
+     env(Env[X <- loc(N)]) nextLoc(N + 1) .
+  eq k(nilBindTo () -> K) = k(K) .
+  eq k(nilBindTo nil -> K) = k(K) .
+
+  op assignTo_ : NameList -> ComputationItem .
+  eq k(valList(mbuiltin(X),VL) -> assignTo(X',XL) -> K) mem(Mem)
+     env(Env) 
+   = CannotBindSyntax .
+  eq k(valList(V,VL) -> assignTo(X,XL) -> K) mem(Mem) env([X,L] Env)
+   = k(valList(VL) -> assignTo(XL) -> K) mem(Mem[L <- V]) env([X,L] Env) [owise] .
+  eq k(valList(nill) -> assignTo() -> K) = k(K) .
+
+  ***
+  *** global environment binds and assignments
+  ***
+  op globalBindTo_ : NameList -> ComputationItem .
+   
+  eq k(valList(mbuiltin(X),VL) -> globalBindTo(X',XL) -> K) mem(Mem)
+     env(Env) nextLoc(N)
+   = CannotBindSyntax .
+  eq k(valList(V,VL) -> globalBindTo(X,XL) -> K) mem(Mem)
+     globalenv(Env) nextLoc(N)
+   = k(valList(VL) -> globalBindTo(XL) -> K) mem(Mem[loc(N),V])
+     globalenv(Env[X <- loc(N)]) nextLoc(N + 1) [owise] .
+  eq k(valList(nill) -> globalBindTo() -> K) = k(K) .
+
+  op globalAssignTo_ : NameList -> ComputationItem .
+  eq k(valList(mbuiltin(X),VL) -> globalAssignTo(X',XL) -> K) mem(Mem)
+     env(Env) nextLoc(N)
+   = CannotBindSyntax .
+  eq k(valList(V,VL) -> globalAssignTo(X,XL) -> K) mem(Mem) globalenv([X,L] Env)
+   = k(valList(VL) -> globalAssignTo(XL) -> K) mem(Mem[L <- V]) globalenv([X,L] Env) .
+  eq k(valList(nill) -> globalAssignTo() -> K) = k(K) .
+
+  ***
+  *** direct location assignment
+  ***
+  op assignToLoc : LocationList -> ComputationItem .
+  
+  eq k(valList(V,VL) -> assignToLoc(L,Ll) -> K) mem(Mem)
+   = k(valList(VL) -> assignToLoc(Ll) -> K) mem(Mem[L <- V]) .
+  eq k(valList(nill)  -> assignToLoc((nill).LocationList) -> K) = k(K) .
+endm
+
+*****************************************************************
+mod CODE-UTILS is
+  including HELPING-OPERATIONS .
+  including LOCATION-ARRAY .
+  op _[_ <- _] : Value Name Value -> ComputationItem .
+  op dup : Value -> ComputationItem .
+  op vecDup : Value Value -> ComputationItem .
+  op strDup : Value Value -> ComputationItem .
+  op makePair : -> ComputationItem .
+  op makePair : Value -> ComputationItem .
+  ops makeConsCell : -> ComputationItem .
+  ops makeConsCellReverse : -> ComputationItem .
+
+  var I : Int . vars X X' : Name . var S : String .
+  var K : Computation .  vars V V' V1 V2 : Value .
+  var Mem : Store .  var N N1 N2 : Nat . var VL : ValueList .
+  vars L1 L2 : Location . var KI : ComputationItem .
+  var LA LA1 LA2 : LocationArray . var Ch : Char . var C : ConsCell .
+  var Env GEnv : Env . 
+
+  ***
+  *** list, vector, and string duplication
+  ***
+  eq k(dup(vector(LA, N)) -> K) 
+   = k(vecDup(vector(LA, N), vector(nill, N)) -> K ) .
+  eq k(dup(string(LA, N)) -> K) 
+   = k(strDup(string(LA, N), string(nill, N)) -> K) .
+  
+  rl k(dup(cell({L1 . L2})) -> K) mem(Mem) 
+  => k(dup(Mem[L1]) -> dup(Mem[L2]) -> makePair -> K) mem(Mem) .
+  rl k(dup(cell({L1 . L2})) -> K) mem(Mem) 
+  => k(valList(Mem[L1]) -> dup(Mem[L2]) -> makePair -> K) mem(Mem) .
+  rl k(dup(cell({L1 . L2})) -> K) mem(Mem) 
+  => k(dup(Mem[L1]) -> valList(Mem[L2]) -> makeConsCellReverse -> K) mem(Mem) .
+  rl k(dup(cell({L1 . L2})) -> K) mem(Mem) 
+  => k(valList((Mem[L1]), (Mem[L2])) -> makeConsCell -> K) mem(Mem) .
+
+  ***
+  *** handle the duplication of vectors
+  ***
+  eq k(vecDup(vector([N1 ; L1] LA1, N), vector(LA2, N)) -> K) 
+     mem(Mem) nextLoc(N2)
+   = k(dup(Mem[L1]) -> assignToLoc(loc(N2)) 
+       -> vecDup(vector(LA1, N), vector(LA2 [N1 ; loc(N2)], N)) -> K) 
+     mem(Mem) nextLoc(N2 + 1) .  
+
+  eq k(vecDup(vector(nill, N), vector(LA, N)) -> K)
+   = k(valList(vector(LA,N)) -> K) .
+
+
+  ***
+  *** unlike with vectors there is no need to dup each element
+  *** because strings must consist of characters, which are
+  *** simple types
+  ***
+  eq k(strDup(string([N1 ; L1] LA1, N), string(LA2, N)) -> K) 
+     mem(Mem) nextLoc(N2)
+   = k(valList(Mem[L1]) -> assignToLoc(loc(N2)) 
+       -> strDup(string(LA1, N), string(LA2 [N1 ; loc(N2)], N)) -> K) 
+     mem(Mem) nextLoc(N2 + 1) [label strdup] .  
+
+  eq k(strDup(string(nill, N), string(LA, N)) -> K)
+   = k(valList(string(LA,N)) -> K) .
+
+  rl k(dup(V) -> K) mem(Mem) => k(valList(V) -> K) mem(Mem) . 
+ 
+  ***
+  *** ConsCell creation with evaluation
+  ***
+  eq  k(valList(V1) -> KI -> makePair -> K) 
+    = k(KI -> makePair(V1) -> K) .
+  eq  k(valList(V2) -> makePair(V1) -> K) 
+    = k(valList(V1,V2) -> makeConsCell -> K) .
+
+  ***
+  *** make ConsCell from (head,tail) value list
+  ***
+  eq k(valList(V,V') -> makeConsCell -> K) nextLoc(N)
+   = k(valList(V,V') -> assignToLoc(locs(N, 2)) -> valList(cell({loc(N) . loc(N + 1)})) -> K) 
+     nextLoc(N + 2) .
+
+  ***
+  *** make ConsCell from (tail,head) value list
+  ***
+  eq k(valList(V,V') -> makeConsCellReverse -> K) 
+   = k(valList(V',V) -> makeConsCell -> K) .
+
+  ***
+  *** convert a scheme list into a NameList
+  ***
+  op list2Names : Value Store -> NameList .
+  eq list2Names(cell({L1 . L2}), (Mem [L1, symbol(X)] [L2, V]))
+   = (X, list2Names(V, Mem [L1, symbol(X)] [L2, V])) .
+  ***
+  *** the logic behind this is that if we get a list where the tail is a symbol
+  *** other than nil we need to insert the name &rest, which specifies
+  *** that the last name should be bound to a list consisting of the
+  *** rest of the arguments, e.g. [define [f x . y] ...], y should
+  *** be bound to whatever extra arguments are passed
+  ***
+  eq list2Names(symbol(X), Mem)
+   = if (X == nil) then () else (&rest, X) fi .
+
+  ***
+  *** convert a scheme list into a ValueList
+  ***
+  op list2Values : Value Store -> ValueList .
+  eq list2Values(cell({L1 . L2}), (Mem [L2,V2])) 
+   = if (V2 == symbol(nil)) then Mem[L1] 
+     else ((Mem[L1]), list2Values(V2, (Mem [L2,V2]))) fi .
+  eq list2Values(symbol(nil), Mem) = nill .
+
+  ***
+  *** convert a ValueList into a scheme list
+  ***
+  op values2List : ValueList -> ComputationItem .
+  eq k(values2List(V) -> K) 
+   = k(valList(symbol(nil)) -> makePair(V) -> K) .
+  eq k(values2List(V1,V2,VL) -> K) 
+   = k(valList(V1) -> values2List(V2,VL) -> makePair -> K) .
+  eq k(values2List(nill) -> K) = k(valList(symbol(nil)) -> K) .
+
+ endm
+
+*****************************************************************
+mod EVAL-SEMANTICS is
+  including HELPING-OPERATIONS .
+  including CODE-UTILS .
+  
+  op evalk : -> ComputationItem .
+  op evalf : Name -> ComputationItem .
+  op preApply : ValueList -> ComputationItem .
+  op randomEval : ValueList Nat -> ComputationItem .
+  op app : -> ComputationItem .
+  op unEval : Value -> Value .
+  op unEvalWrap(_;_) : ValueList ValueList -> ValueList .
+  op hole : -> Value .
+  op apply : ValueList -> ComputationItem .
+
+  var C : ConsCell .  vars VL VL' : ValueList .  vars V V1 V2 : Value .
+  vars L1 L2 : Location .  var Env Env' GEnv GEnv' : Env .  var Mem : Store .  
+  var K K' : Computation . vars I1 I2 : Int . var X : Name .
+  var XL XL' XL'' : NameList .  var S : String .
+  var L : Location . var LA : LocationArray . var N : Nat . var Ch : Char .
+
+  ***
+  *** apply the eval function with an environment
+  ***
+  eq k(apply(fbuiltin('eval), V, environment(Env, GEnv)) -> K) 
+     env(Env') globalenv(GEnv')
+   = k(valList(V) -> evalk -> kenv2(Env', GEnv') -> K) env(Env) globalenv(GEnv) .
+
+  ***
+  *** apply the eval function with no environment 
+  ***
+  eq k(apply(fbuiltin('eval), V) -> K) 
+   = k(valList(V) -> evalk -> K) .
+
+  ***
+  *** k-evaluate the different value types
+  ***
+  *** these first equations are for those
+  *** types whose values always evaluate to 
+  *** themselves
+  ***
+  eq k(valList(int(I1)) -> evalk -> K) = k(valList(int(I1)) -> K) .
+    eq k(valList(char(Ch)) -> evalk -> K) = k(valList(char(Ch)) -> K) .
+  eq k(valList(vector(LA,N)) -> evalk -> K) = k(valList(vector(LA,N)) -> K) .
+  eq k(valList(string(LA,N)) -> evalk -> K) = k(valList(string(LA,N)) -> K) .
+  eq k(valList(environment(Env, GEnv)) -> evalk -> K)
+   = k(valList(environment(Env, GEnv)) -> K) .
+  eq k(valList(fclosure(XL, VL, Env)) -> evalk -> K) 
+   = k(valList(fclosure(XL, VL, Env)) -> K) .
+  eq k(valList(fbuiltin(X)) -> evalk -> K) 
+   = k(valList(fbuiltin(X)) -> K) .
+  eq k(valList(mbuiltin(X)) -> evalk -> K) 
+   = k(valList(mbuiltin(X)) -> K) .
+
+  ***
+  *** cells denote procedure, mbuiltins, or continuation
+  *** application
+  ***
+  eq k(valList(cell(C)) -> evalk -> K) mem(Mem) 
+   = k(preApply(list2Values(cell(C),Mem)) -> K) mem(Mem) .
+ 
+  ***
+  *** symbol evaluation, needs several equations
+  ***
+  *** first are special symbols that need
+  *** to evaluate to themselves
+  ***
+  eq k(valList(symbol('else)) -> evalk -> K)
+   = k(valList(symbol('else)) -> K) .
+
+  eq k(valList(symbol(#t)) -> evalk -> K)  
+   = k(valList(symbol(#t)) -> K) .
+  eq k(valList(symbol(#f)) -> evalk -> K) 
+   = k(valList(symbol(#f)) -> K) .
+
+  eq k(valList(symbol(nil)) -> evalk -> K)
+   = k(valList(symbol(nil)) -> K) .
+  eq k(valList(symbol(nilVec)) -> evalk -> K)
+   = k(valList(symbol(nilVec)) -> K) .
+  eq k(valList(symbol(nilStr)) -> evalk -> K)
+   = k(valList(symbol(nilStr)) -> K) .
+
+  *** 
+  *** this is to fix the way If is handled, normally we 
+  *** would not want the user to be able to enter the name
+  *** unspecified, but we can just fix that in the parser
+  ***
+  eq k(valList(symbol(unspecified)) -> evalk -> K) 
+   = k(valList(symbol(unspecified)) -> K) .
+  
+  ***
+  *** here are normal symbols which must be looked up when
+  *** evaluated
+  ***
+  eq k(valList(symbol(X)) -> evalk -> K) mem(Mem) env([X,L] Env) fbuiltins(XL)  
+   = k(valList(Mem[L]) -> K) mem(Mem) env([X,L] Env) fbuiltins(XL) [owise] .
+  eq k(valList(symbol(X)) -> evalk  -> K) mem(Mem) env(Env) globalenv([X,L] GEnv) 
+     fbuiltins(XL) 
+   = k(valList(Mem[L]) -> K) mem(Mem) env(Env) globalenv([X,L] GEnv) 
+     fbuiltins(XL) [owise] .
+  eq k(valList(symbol(X)) -> evalk -> K) mem(Mem) env(Env) globalenv(GEnv) 
+     fbuiltins(XL, X, XL') 
+   = k(valList(fbuiltin(X)) -> globalBindTo(X) -> valList(fbuiltin(X)) -> K) mem(Mem) 
+     env(Env) globalenv(GEnv) fbuiltins(XL, X, XL') [owise] .
+
+  ***
+  *** lastly, if it's not bound and not a keyword it is an error
+  *** alert the user to an unbound variable error.
+  ***
+  eq k(valList(symbol(X)) -> evalk -> K) mem(Mem) 
+     env(Env) globalenv(GEnv) fbuiltins(XL) mbuiltins(XL') 
+   = UnboundVariable(X) env(Env) globalenv(GEnv) fbuiltins(XL) mbuiltins(XL') [owise] .
+
+
+  *** This comment is wrong since added random order of evaluation!
+  *** FIXME
+  ***
+  *** whatever the first value is in the preApply
+  *** it must be evaluated.  It must either be
+  *** a symbol, or a lambda form, a closure or builtin
+  *** of some sort, or a continuation.  
+  *** If it is a closure or builtin evaluation
+  *** will not do anything, but it doesn't hurt.  If it is
+  *** a symbol the lookup will get the closure or builtin
+  *** it is bound to.  If it is a lambda form it will evaluate
+  *** to an fclosure
+  ***
+  eq k(preApply(mbuiltin(X), VL) -> K)
+   = k(apply(mbuiltin(X),VL) -> K) .
+  eq k(preApply(VL) -> K) 
+   = k(randomEval(unEvalWrap(nill ; VL), length(VL)) -> app -> K) [owise] .
+
+  eq unEvalWrap(VL ; V, VL') = unEvalWrap(VL, unEval(V) ; VL') .
+  eq unEvalWrap(VL ; nill) = VL .
+
+  eq k(randomEval(VL,0) -> app -> K) =
+     k(apply(VL) -> K) .
+  rl k(randomEval(VL, unEval(V), VL', s N) -> K) 
+   => k(valList(V) -> evalk -> randomEval(VL, hole, VL', N) -> K) .
+
+  eq k(valList(V) -> randomEval(VL, hole, VL', N) -> K)
+   = k(randomEval(VL, V, VL', N) -> K) .
+
+  ceq k(apply(V, VL) -> K) = WrongTypeToApply(V)
+   if not (V :: Applicable) . 
+
+  *****Move me?
+  ***
+  *** body is used for the handling of code bodies in let and lambda type
+  *** situations.  It is used to preprocess internal defines
+  ***
+  op body : ValueList -> ComputationItem .
+  
+  ***
+  *** defines holds the initial internal defines as
+  *** we find them
+  ***
+  op defines : ValueList -> ComputationItem .
+  
+  ***
+  *** preDefine is a signal to perform a nilBindTo (like letrec)
+  ***
+  op preDefine : ValueList -> ComputationItem .
+  
+  *** 
+  *** yet again we have to make annoying concessions
+  *** to binding in parallel
+  ***
+  op processInits : ValueList -> ComputationItem .
+
+  ***
+  *** defineNow finally performs the bindings, after the nilBindTos
+  ***
+  op defineNow : ValueList -> ComputationItem .
+
+  eq k(body(VL) -> K) = k(defines(nill) -> body(VL) -> K) .
+ 
+  ***
+  *** if the first value is a define process it
+  ***
+  eq k(defines(VL) -> body(cell({ L1 . L2}), VL') -> K) 
+     mem([L1, symbol('define)] Mem)
+   = k(defines(VL, list2Values(Mem[L2], Mem)) -> body(VL') -> K) 
+     mem([L1, symbol('define)] Mem) .
+
+  ***
+  *** otherwise, we are done with internal defines, perform
+  *** the defines and apply begin to the remaining ValueList
+  *** as all bodies allow multiple expressions as if in the
+  *** begin form
+  ***
+  eq k(defines(VL) -> body(VL') -> K) mem(Mem)
+   = k(preDefine(VL) -> processInits(nill) -> defineNow(nill) 
+       -> apply(mbuiltin('begin), VL') -> K) mem(Mem) [owise] .
+
+  ***
+  *** first do the intial nilBindTo
+  ***
+  *** base case, end of preDefine list
+  ***
+  eq k(preDefine(nill) -> K) = k(K) .
+
+  ***
+  *** inductive case, nilBind the symbol
+  ***
+  eq k(preDefine(symbol(X),V,VL) -> processInits(VL') -> K) 
+   = k(nilBindTo(X) -> preDefine(VL) -> processInits(VL', symbol(X), V) -> K) .
+
+  ***
+  *** defun form, hack creating more locs for symbol('lambda),
+  *** but this would happen in translating a list anyway I suppose
+  ***
+  ***--- this won't work with current ValueList's, need to know
+  ***--- where one define ends and the next begins, the current
+  ***--- use of the symbol, Value alternation would have to be
+  ***--- replaced by something more sophisticated (such as a define
+  ***--- constructor with a DefineList instead of a ValueList) 
+  ***--- better in my opinion to use a macro for defun instead
+  ***--- the way most interpeters do
+  ---eq k(preDefine(cell({L1 . L2}), VL) -> processInits(VL') -> K) 
+  ---   mem(Mem [L1, symbol(X)]) nextLoc(N)
+  --- = k(nilBindTo(symbol(X)) -> preDefine(VL) 
+  ---     -> processInits(VL', symbol(X), cell{loc(N) . L2}) -> K)
+  ---   mem(Mem [L1, symbol(X)] [loc(N), symbol(lambda)]) nextLoc(N + 1) .
+
+  *** 
+  *** evaluate each init, we must do this like this because
+  *** Scheme annoyingly requires things to be evaluated in parallel,
+  *** e.g. (let () (define x 1)(define y x) ...) should
+  *** result in an unbound variable, unless there is a binding for
+  *** x in a higher scope.  If we just processed in order the
+  *** second define would grab the value 1 for y
+  ***
+  *** base case, end of processInits list
+  ***
+  eq k(processInits(nill) -> K) = k(K) .
+
+  ***
+  *** inductive case evaluate the initializer
+  *** the equations are a bit odd, because we need to hold onto the symbol
+  *** so it is placed in defineNow and for a few rewrites defineNow
+  *** will end with a symbol
+  ***
+  eq k(processInits(symbol(X), V, VL) -> defineNow(VL') -> K)
+   = k(valList(V) -> evalk -> processInits(VL) -> defineNow(VL', symbol(X)) -> K) .
+
+  eq k(valList(V) -> processInits(VL) -> defineNow(VL') -> K)
+   = k(processInits(VL) -> defineNow(VL', V) -> K) .
+
+  ***
+  *** finally, perform the actual defines, now that we have prebound all the symbols
+  *** just like in letrec, and that all the inits have been evaluated
+  ***
+  *** base case, end of defineNow list
+  ***
+  eq k(defineNow(nill) -> K) = k(K) .
+
+  ***
+  *** inductive case, assign the already evaluated init to the symbol
+  *** because the symbol has already been nilBound, we do not want to
+  *** change the loc it points to, but what that loc points to
+  ***
+  eq k(defineNow(symbol(X), V, VL) -> K) 
+   = k(valList(V) -> assignTo(X) -> defineNow(VL) -> K) .
+endm
+
+*****************************************************************
+***
+*** this module is mostly for converting syntax
+*** to internal representation
+***
+mod GENERIC-EXP-SEMANTICS is
+  including EVAL-SEMANTICS .
+  including CODE-UTILS .
+
+  ***
+  *** The idea here:  makeConsList is for making proper lists... or
+  *** at least lists where what is to be 'appended as the last element is a 
+  *** VALUE. makeConsPair, on the other hand, is used when it is not known 
+  *** what the VALUE of the cdr of a conscell should be.  This happens 
+  *** when we have something in the written syntax like [1 . [ 2 . []]]... 
+  *** the equation will just see [IL . IL'], and it needs to turn IL' into 
+  *** a value before it can appened it to the list made by IL.
+  ***
+  op makeConsList : ItemList Value -> ComputationItem .
+  op makeConsPair : ItemList -> ComputationItem .
+  op makeVector : ItemList Nat -> ComputationItem .
+  op makeVector2 : Nat -> ComputationItem .
+  op makeString : String Nat -> ComputationItem .
+  op incompleteLA : LocationArray -> ComputationItem .
+
+  var I : Int .  var X : Name .  var S : String .  var L : Location .  
+  var V : Value . var K : Computation .  vars Env GEnv : Env .  
+  var Mem : Store . var C : ConsCell .  var Li : List .  
+  var IL IL' IL'' : ItemList . var E : Exp . var PLS : PLState . 
+  var N N' : Nat . var LA : LocationArray . var Ch : Char .
+  var XL XL' XL'' : NameList .
+
+  ***
+  *** process an item list with multiple expressions
+  ***
+  *** op ignore is just a useful flag
+  ***
+  op ignore : -> Value .
+  eq k(makeConsList(IL E,V) -> K)  
+   = k(makeConsList(E,V) -> makeConsList(IL,ignore) -> K) .
+  eq k(valList(V) -> makeConsList(IL,ignore) -> K) = k(makeConsList(IL,V) -> K) .
+
+  *** 
+  *** handle vector start case
+  ***
+  eq k(makeVector(IL, N) -> K) nextLoc(N') 
+  = k(incompleteLA(nill) -> makeVector(IL, N) -> K) nextLoc(N') . 
+
+  eq k(incompleteLA(LA) -> makeVector(E, N) -> K) nextLoc(N') 
+   = k(expList($ E) -> incompleteLA(LA) -> makeVector2(N) -> K) nextLoc(N') .
+  
+  ***
+  *** process a vector with multiple expressions
+  ***
+  eq k(incompleteLA(LA) -> makeVector(E IL, N) -> K) nextLoc(N') 
+   = k(expList($ E) -> incompleteLA(LA) -> makeVector(IL, N) -> K) nextLoc(N') .
+
+  eq k(valList(V) -> incompleteLA(LA) -> makeVector2(N) -> K) nextLoc(N')
+   = k(valList(V) -> assignToLoc(loc(N')) -> valList(vector(LA [N ; loc(N')], N + 1)) -> K) 
+     nextLoc(N' + 1) . 
+  eq k(valList(V) -> incompleteLA(LA) -> makeVector(IL, N) -> K) nextLoc(N') 
+   = k(valList(V) -> assignToLoc(loc(N')) -> incompleteLA(LA [N ; loc(N')]) -> 
+     makeVector(IL, N + 1) -> K) nextLoc(N' + 1) .
+  
+  *** 
+  *** process an item list with one expression
+  ***
+  *** special cases
+  ***
+  eq k(makeConsList([], V) -> K) = k(valList(symbol(nil),V) -> makeConsCell -> K) .
+  eq k(makeConsList(#[], V) -> K) = k(valList(symbol(nilVec),V) -> makeConsCell -> K) .
+  eq k(makeConsList({""}, V) -> K) = k(valList(symbol(nilStr),V) -> makeConsCell -> K) .
+  
+  ***
+  *** general cases
+  ***
+  eq k(makeConsList(X, V) -> K) mbuiltins(XL,X,XL')
+   = k(valList(mbuiltin(X),V) -> makeConsCell -> K) mbuiltins(XL,X,XL') . 
+  eq k(makeConsList(X, V) -> K) mbuiltins(XL) 
+   = k(valList(symbol(X),V) -> makeConsCell -> K) mbuiltins(XL) [owise] .
+  eq k(makeConsList(I, V) -> K)  = k(valList(int(I),V) -> makeConsCell -> K) .
+  eq k(makeConsList(#\(Ch), V) -> K)  = k(valList(char(Ch), V) -> makeConsCell -> K) .
+  eq k(makeConsList({S},V) -> K)  
+   = k(makeString(S, 0) -> valList(V) -> makeConsCellReverse -> K) [owise] .
+  eq k(makeConsList([. E], V) -> K)  = k(makeConsList(E,V) -> K) .
+  eq k(makeConsList(#[IL], V) -> K)  
+   = k(makeVector(IL, 0) -> valList(V) -> makeConsCellReverse -> K) .
+  eq k(makeConsList([IL], V) -> K)  
+   = k(makeConsList(IL,symbol(nil)) -> valList(V) -> makeConsCellReverse -> K) .
+
+  ***
+  *** support for improper lists (dotted pairs)
+  ***
+  ***
+  *** if we see makeConsList with a dotted pair we need
+  *** to switch over to makeConsPair so that we can 
+  *** evaluate expression cdrs
+  ***
+  eq k(makeConsList([IL . E], V) -> K) 
+   = k(makeConsPair([IL . E]) -> valList(V) -> makeConsCellReverse -> K) .
+  
+  eq k(makeConsPair([IL . E]) -> K ) 
+   = k(makeConsPair(E) -> makeConsPair(IL) -> K) .
+
+  ***
+  *** rules for makeConsList of primative types 
+  *** these just expect the primative type to be put back on
+  *** the continuation, we can put it as is, and let
+  *** other rules type wrap it (i.e. integer evaluation).  I prefer to
+  *** type wrap it off the bat to save a rewrite.  Also more intuitive.
+  ***
+  *** special cases
+  ***
+  eq k(makeConsPair([]) -> K) 
+   = k(valList(symbol(nil)) -> K) .
+  eq k(makeConsPair(#[]) -> K) 
+   = k(valList(symbol(nilVec)) -> K) .
+  eq k(makeConsPair({""}) -> K) 
+   = k(valList(symbol(nilStr)) -> K) .
+
+  ***
+  *** general cases  
+  ***
+  eq k(makeConsPair(I) -> K) 
+   = k(valList(int(I)) -> K) .
+  eq k(makeConsPair(#\(Ch)) -> K) 
+   = k(valList(char(Ch)) -> K) .
+  eq k(makeConsPair(X) -> K) mbuiltins(XL,X,XL')
+   = k(valList(mbuiltin(X)) -> K) mbuiltins(XL,X,XL') .
+  eq k(makeConsPair(X) -> K) mbuiltins(XL)
+   = k(valList(symbol(X)) -> K) mbuiltins(XL) [owise] .
+  
+  ***
+  *** owise because of the nilStr case
+  ***
+  eq k(makeConsPair({S}) -> K) 
+   = k(makeString(S,0) -> K)  [owise] .
+  eq k(makeConsPair([IL]) -> K) 
+   = k(makeConsList(IL, symbol(nil)) -> K) .
+  eq k(makeConsPair(#[IL]) -> K) 
+   = k(makeVector(IL,0) -> K) .
+  
+  ***
+  *** Equation 0
+  *** anytime we have a value followed by
+  *** makeConsPair(IL) make a ConsList of IL with V 'appended
+  *** we can use makeConsList becuase V is actually a VALUE
+  *** rather than an Expression.  This is why we needed to
+  *** add makeConsPair to get improper lists to work, cases where
+  *** what we need to 'append as the cdr is still an expression
+  *** rather than a value.  The original LISB impelementation
+  *** could always assume that the cdr would be a value.
+  ***
+  eq k(valList(V) -> makeConsPair(IL) -> K) 
+   = k(makeConsList(IL, V) -> K) .
+
+  ***
+  *** starting case for makeString
+  ***
+  eq k(makeString(S,N) -> K) 
+   = k(incompleteLA(nill) -> makeString(S,N) -> K) .
+ 
+  ***
+  *** ending case for makeString
+  ***
+  eq k(incompleteLA(LA) -> makeString("", N) -> K)  nextLoc(N')
+   = k(valList(string(LA, N)) -> K)  nextLoc(N') .
+
+  ***
+  *** continuing case for makeString
+  ***
+  eq k(incompleteLA(LA) -> makeString(S,N) -> K)  nextLoc(N')
+   = k(valList(char(substr(S,0,1))) -> assignToLoc(loc(N')) 
+       -> incompleteLA(LA [N ; loc(N')]) 
+       -> makeString(substr(S,1,length(S)), N + 1) -> K)  
+     nextLoc(N' + 1) [owise] .
+
+  ***
+  *** integer conversion
+  ***
+  eq k(expList(I) -> K)  = k(valList(int(I)) -> K) .
+
+  ***
+  *** character conversion
+  ***
+  eq k(expList(#\(Ch)) -> K)  = k(valList(char(Ch)) -> K) .
+
+  ***
+  *** string conversion
+  ***
+  eq k(expList({S}) -> K)  = k(makeString(S,0) -> K) .
+
+  ***
+  *** vector conversion
+  *** 
+  eq k(expList(#[IL]) -> K)  = k(makeVector(IL, 0) -> K) .
+
+  eq k(expList([]) -> K)
+   = k(valList(symbol(nil)) -> K) .
+  eq k(expList(nil) -> K)
+   = k(valList(symbol(nil)) -> K) .
+  eq k(expList(#[]) -> K)
+   = k(valList(symbol(nilVec)) -> K) .
+  eq k(expList(nilVec) -> K)
+   = k(valList(symbol(nilVec)) -> K) .
+  eq k(expList({""}) -> K)
+   = k(valList(symbol(nilStr)) -> K) .
+  eq k(expList(nilStr) -> K)
+   = k(valList(symbol(nilStr)) -> K) .
+
+  *** 
+  *** list conversion
+  ***
+  eq k(expList([IL]) -> K)  = k(makeConsList(IL,symbol(nil)) -> evalk -> K) .
+  eq k(expList([IL . E]) -> K)  = k(makeConsPair([IL . E]) -> evalk -> K) .
+  eq k(expList([. E]) -> K)  = k(expList(E) -> evalk -> K) .
+endm
+
+*****************************************************************
+mod QUOTE-SEMANTICS is
+  including EVAL-SEMANTICS .
+  var V V' V1 V2 V3 : Value .  var K K' : Computation . var Mem Mem' : Store .
+  var X : Name . var I : Int . var S : String . vars L1 L2 : Location . 
+  var Env GEnv : Env . var N N1 N2 N3 N4 : Nat . var LA LA' : LocationArray .
+  var VL VL1 VL2 VL3 : ValueList . var C : ConsCell .
+
+  ***
+  *** originally we duplicated V, this turns out to be unecessary,
+  *** as modifying quoted structures is undefined.
+  ***
+  eq k(apply(mbuiltin('quote), V) -> K) 
+   = k(dup(V) -> K) .
+ 
+  op qq : Value Nat -> ComputationItem .
+  op splice : -> ComputationItem .
+  op splice : ValueList -> ComputationItem .
+  op splice : Value ValueList Value Store -> ComputationItem .
+  op splice : Value ValueList Value Nat Store -> ComputationItem .
+  op doneSplicing : -> ComputationItem .
+  op doneSplicing : Value ValueList Store -> ComputationItem .
+
+  ***
+  *** quasiquote simply calls the qq operator, which is extremely 
+  *** similar to dup.  It also adds unquote to the environment
+  *** because this seems to be the behavior in actual
+  *** scheme interpreters.  The environment is recovered
+  *** after the quasiquote.
+  ***
+  eq k(apply(mbuiltin('quasiquote), V) -> K)  env(Env) 
+   = k(valList(mbuiltin('unquote)) -> bindTo('unquote) -> 
+     valList(mbuiltin('unquote-splicing)) -> bindTo('unquote-splicing) ->
+     qq(V, 0) -> kenv(Env) -> splice -> K)  env(Env) .
+
+  ceq k(valList(V) -> splice -> K) unquotes(VL)
+   = k(valList(V) -> K) unquotes(nill)
+  if VL == nill .
+
+  ceq k(valList(V) -> splice -> K) unquotes(VL) 
+   = k(randomEval(unEvalWrap(nill ; VL), length(VL)) -> splice(V) -> K) unquotes(nill) 
+  if VL =/= nill .
+
+  eq k(randomEval(VL, 0) -> splice(V) -> K) mem(Mem) 
+   = k(splice(V, VL, V, Mem) -> doneSplicing -> K) mem(Mem) .
+
+  ***
+  *** splice
+  ***
+  eq k(splice(V, (V', VL), cell({L1 . L2}), Mem [L1, hole]) -> K)
+   = k(splice(V, VL, cell({L1 . L2}), Mem [L1, V']) -> K) .
+
+ ceq k(splice(V, VL, cell({L1 . L2}), Mem [L1, V']) -> K)
+   = k(splice(V, VL, V', Mem [L1, V']) -> splice(V, VL, Mem[L2], Mem [L1, V']) -> K) 
+  if (V' :: QQForm) .
+
+  eq k(splice(V, (V', VL), cell({L1 . L2}), Mem [L2, hole]) -> K)
+   = k(doneSplicing(V, VL, Mem [L2, V']) -> K) [owise] .
+
+  eq k(splice(V, VL, symbol(nil), Mem) -> K)
+   = k(doneSplicing(V, VL, Mem) -> K) [owise] .
+
+  eq k(splice(V, nill, V', Mem) -> K)
+   = k(doneSplicing(V, nill, Mem) -> K) .
+
+  eq k(splice(V, VL, cell({L1 . L2}), Mem [L2, V']) -> K)
+   = k(splice(V, VL, V', Mem [L2, V']) -> K) [owise] .
+
+  ***
+  *** finished! replace mem with the mem we just modified
+  ***  
+  eq k(doneSplicing(V, VL, Mem) -> doneSplicing -> K) mem(Mem')
+   = k(valList(V) -> K) mem(Mem) . 
+
+  eq k(doneSplicing(V1, VL1, Mem) -> splice(V2, VL2, V3, Mem') -> K)
+   = k(splice(V2, VL1, V3, Mem) -> K) .
+
+  eq k(doneSplicing(V1, VL1, Mem) -> splice(V2, VL2, V3, N, Mem') -> K)
+   = k(splice(V2, VL1, V3, N, Mem) -> K) .
+
+  ***
+  *** splicing vectors
+  *** 
+  *** vectors needs to keep track of the current index because
+  *** location arrays are commutative, in retrospect the commutativity
+  *** has been really annoying
+  *** 
+  eq splice(V, VL, vector(LA, N2), Mem) = splice(V, VL, vector(LA, N2), 0, Mem) .
+
+  eq k(splice(V, (V', VL), vector([N1 ; L1] LA, N2), N1, Mem [L1, hole]) -> K)
+   = k(splice(V, VL, vector(LA, N2), N1 + 1, Mem [L1, V']) -> K) . 
+
+ ceq k(splice(V, VL, vector([N1 ; L1] LA, N2), N1, Mem [L1, V']) -> K)
+   = k(splice(V, VL, V', Mem [L1, V']) -> splice(V, VL, vector(LA, N2), N1 + 1, Mem [L1, V']) -> K)
+  if (V' :: QQForm) .
+
+  eq k(splice(V, VL, vector([N1 ; L1] LA, N2), N1, Mem [L1, V']) -> K)
+   = k(splice(V, VL, vector(LA, N2), N1 + 1, Mem [L1, V']) -> K) [owise] .
+  
+  eq k(splice(V, nill, V', N, Mem) -> K)
+   = k(doneSplicing(V, nill, Mem) -> K) .
+
+  eq k(splice(V, VL, vector(nill, N1), N2, Mem) -> K)
+   = k(doneSplicing(V, VL, Mem) -> K) .
+
+  ***
+  *** for some reason applying unquote needs to unbind
+  *** unquote... this is what both guile and MIT-scheme do
+  *** If we don't unbind unquote
+  *** red run ![3 !![ display unquote]] .
+  *** produces "#<primitive-macro unquote>"
+  *** while it SHOULD crash (yea, stupid isn't it?)
+  *** THEN after we eval V we need to reinsert unquote in
+  *** case there is another unquote before a quasiquote
+  *** (even more stupid isn't it?  Seems like it would 
+  *** be a lot better just to leave unquote in the env)
+  ***
+  *** initially I thought unquote should be a function and just
+  *** put V on the continuation, but such makes unmapping
+  *** unquote BEFORE EVALING V, impossible.
+  ***
+  eq k(apply(mbuiltin('unquote), V) -> K)  
+   env(Env ['unquote, L1] ['unquote-splicing, L2]) unquotes(VL) 
+   = k(valList(hole) -> kenv(Env ['unquote, L1] ['unquote-splicing, L2]) -> K)  
+   env(Env) unquotes(VL, V) .
+
+  op uqs : -> ComputationItem .
+  op uqs : Value -> ComputationItem .
+
+  eq k(apply(mbuiltin('unquote-splicing), V) -> K)  
+   env(Env ['unquote, L1] ['unquote-splicing, L2]) 
+   = k(valList(V) -> evalk -> kenv(Env ['unquote, L1] ['unquote-splicing, L2]) -> uqs -> K)  
+   env(Env) .
+
+  op qqVec : LocationArray Nat -> ComputationItem .
+
+  ***
+  *** handle qq of vectors
+  ***
+  eq k(qq(vector([N ; L1] LA, N1), N2) -> K) mem(Mem) 
+   = k(qq(Mem[L1], N2) -> qqVec(nill, 0) -> qq(vector(LA, N1), N2) -> K)  
+     mem(Mem) .
+  eq k(valList(V, nill) -> qqVec(LA, N) -> qq(vector([N1 ; L1] LA', N2), N3) -> K) 
+     mem(Mem) nextLoc(N4)
+   = k(valList(V) -> assignToLoc(loc(N4)) -> qq(Mem[L1], N3) 
+       -> qqVec(LA [N ; loc(N4)], N + 1)  
+       -> qq(vector(LA', N2), N3) -> K) 
+     mem(Mem) nextLoc(N4 + 1) .
+  eq k(valList(V, nill) -> qqVec(LA, N) -> qq(vector(nill, N2), N3) -> K) mem(Mem) 
+     nextLoc(N4)
+   = k(valList(V) -> assignToLoc(loc(N4)) -> valList(vector(LA [N ; loc(N4)], s N))  -> K) 
+     mem(Mem) nextLoc(N4 + 1) .
+  
+  ***
+  *** handle when we have a ValueList with more than one element to asssign
+  ***
+  eq k(valList(V, VL) -> qqVec(LA,N) -> qq(vector(LA', N2), N3) -> K) mem(Mem) 
+     nextLoc(N4)
+   = k(valList(V) -> assignToLoc(loc(N4)) -> valList(VL) -> qqVec(LA [N ; loc(N4)], N + 1)
+     -> qq(vector(LA', N2), N3) -> K) mem(Mem) nextLoc(N4 + 1) .
+
+  ***
+  *** handle a list that needs to be spliced into a vector
+  ***
+  eq k(valList(V) -> uqs -> qqVec(LA, N) -> qq(vector(LA', N2), N3) -> K) mem(Mem) 
+     nextLoc(N4)
+   = k(valList(list2Values(V,Mem)) -> qqVec(LA, N)  
+     -> qq(vector(LA', N2), N3) -> K) 
+     mem(Mem) nextLoc(N4) .
+
+  *** 
+  *** this is the only line that differs from dup
+  *** what I wouldn't give for parametric operators
+  *** the idea here is if L1 is unquote, we'll just pass
+  *** the whole list onto evaluation
+  *** when the evaluation gets to apply(fbuiltin('unquote),V)
+  *** we can then just grab V.  The idea was to let
+  *** the extant definition do the grunt work.
+  *** I think this is elegant, if I did this
+  *** differently (say valList(Mem[L2]) -> evalk) I would
+  *** need to differentiate between when Mem[L2] was
+  *** a list like [3 . []] and when it was a list
+  *** with an actual application.
+  *** downside is double unquote lookup.  Upside is this eq would be very long 
+  *** due to unquote bind/unbind
+  ***
+  *** need to handle when quasi-quote is called again
+  *** somehow it can't be eqvaulated yet must increase the level...
+  ***
+  eq k(K' -> qq(cell({L1 . L2}), N) -> K) mem(Mem [L1, mbuiltin('quasiquote)])
+   = k(K' -> valList(symbol('quasiquote)) -> qq(Mem [L2], N + 1) -> makePair -> K) 
+     mem(Mem [L1, symbol('quasiquote)]) [label qq].
+
+  ***
+  *** if we are at the proper quasi-quote level
+  *** evaulate, otherwise put a literal unquote in, and subtract the level
+  ***
+  eq k(qq(cell({L1 . L2}), 0) -> K) mem(Mem [L1, symbol('unquote)])
+   = k(apply(mbuiltin('unquote),list2Values(Mem[L2],Mem)) 
+       -> K) mem(Mem [L1, symbol('unquote)]) [label uq] .
+
+  eq k(qq(cell({L1 . L2}), N) -> K) mem(Mem [L1, symbol('unquote)])
+   = k(valList(symbol('unquote)) -> qq(Mem[L2], N + (-1)) -> makePair -> K) 
+     mem(Mem [L1, symbol('unquote)]) [label uqn] .
+
+  ***
+  *** if we are at the proper quasi-quote level
+  *** evaulate, otherwise put a literal unquote-splicing in, and subtract the level
+  *** 
+  eq k(qq(cell({L1 . L2}), 0) -> K) mem(Mem [L1, symbol('unquote-splicing)])
+   = k(apply(mbuiltin('unquote-splicing),list2Values(Mem[L2],Mem)) 
+       -> K) mem(Mem [L1, symbol('unquote-splicing)]) .
+
+  eq k(qq(cell({L1 . L2}), N) -> K) mem(Mem [L1, symbol('unquote-splicing)])
+   = k(valList(symbol('unquote-splicing)) -> qq(Mem[L2], N + (-1)) -> makePair -> K) 
+     mem(Mem [L1, symbol('unquote-splicing)]) .
+
+  ***
+  *** not a quasi-quote, unquote, or unquote-splicing form
+  *** 
+  eq k(qq(cell({L1 . L2}), N) -> K) mem(Mem)
+  = k(qq(Mem[L1], N) -> qq(Mem[L2], N) -> makePair -> K) mem(Mem) [owise] .
+ 
+  eq k(qq(V,N) -> K) mem(Mem)
+   = k(valList(V) -> K) mem(Mem) [owise] .
+
+  ***
+  *** unquote-splicing specific rules 
+  *** must be a list in a splicing unquote
+  ***
+  eq k(valList(cell({L1 . L2})) -> uqs -> qq(V, N) -> K) mem(Mem)
+   = k(qq(V, N) -> uqs(cell({L1 . L2})) -> K) mem(Mem) .
+  op 'append : Value Value  -> ComputationItem .
+  op pre'append : Value -> ComputationItem .
+  eq k(uqs(V) -> makePair(V') -> K) mem(Mem)
+   = k(dup(V) -> pre'append(V') -> K) mem(Mem) .
+  eq k(valList(V) -> pre'append(V') -> K) mem(Mem)
+   = k('append(V, V') -> valList(V) -> K) mem(Mem) .
+  
+  eq k('append(cell({L1 . L2}), V') -> K) mem(Mem [L2, symbol(nil)])
+   = k(valList(V') -> assignToLoc(L2) -> K) mem(Mem [L2, symbol(nil)]) .
+  eq k('append(cell({L1 . L2}), V') -> K) mem(Mem [L2, cell(C)])
+   = k('append(cell(C), V') -> K) mem(Mem [L2, cell(C)]) .
+endm
+
+*****************************************************************
+mod ARITHMETIC-EXP-SEMANTICS is
+  including EVAL-SEMANTICS .
+  var K : Computation .  vars I I1 I2 : Int . var Mem : Store .
+  var V : Value . var VL : ValueList .
+
+  ops add sub mul div : Int ValueList -> ComputationItem . 
+  
+  eq k(apply(fbuiltin('+), VL) -> K) 
+    = k(add(0,VL) -> K) .
+  eq k(add(I,nill) -> K)  
+    = k(valList(int(I)) -> K) .
+  eq k(add(I1,int(I2),VL) -> K) 
+    = k(add(I1 + I2, VL) -> K)  [owise] . 
+
+  ***
+  *** sub requires at least one integer
+  *** unfortuantely it special cases application to one
+  *** element as negation :(
+  ***
+  eq k(apply(fbuiltin('-), int(I), nill) -> K) 
+   = k(valList(int(- I)) -> K) .
+  eq k(apply(fbuiltin('-), int(I), VL) -> K) 
+    = k(sub(I,VL) -> K)  [owise] .
+  eq k(sub(I, nill) -> K)  
+    = k(valList(int(I)) -> K) .
+  eq k(sub(I1,int(I2),VL) -> K) 
+    = k(sub(I1 + (- I2), VL) -> K)  [owise] . 
+
+  eq k(apply(fbuiltin('*), VL) -> K) 
+    = k(mul(1,VL) -> K) .
+  eq k(mul(I,nill) -> K)  
+    = k(valList(int(I)) -> K) .
+  eq k(mul(I1,int(I2),VL) -> K) 
+    = k(mul(I1 * I2, VL) -> K)  [owise] . 
+
+  eq k(apply(fbuiltin('/), int(I), VL) -> K) 
+    = k(div(I,VL) -> K) .
+  eq k(div(I,nill) -> K)  
+    = k(valList(int(I)) -> K) .
+  eq k(div(I1,int(I2),VL) -> K) 
+    = k(div(I1 quo I2, VL) -> K)  [owise] . 
+
+  eq k(apply(fbuiltin('expt), int(I1), int(I2)) -> K) 
+   = k(valList(int(I1 ^ I2)) -> K) .
+endm
+
+*****************************************************************
+mod BOOLEAN-EXP-SEMANTICS is
+  including EVAL-SEMANTICS .
+  var K : Computation .  var VL : ValueList . var V V' : Value .
+  vars I1 I2 : Int . var B : Bool . var Mem : Store .
+  
+  ***
+  *** not
+  ***
+  eq k(apply(fbuiltin('not), symbol(#f)) -> K) 
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('not), V) -> K) 
+   = k(valList(symbol(#f)) -> K)  [owise] .
+
+  ***
+  *** and
+  ***
+  eq k(apply(mbuiltin('and)) -> K) 
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(mbuiltin('and), V, VL) -> K) 
+   = k(valList(V) -> evalk -> apply(mbuiltin('and), VL) -> K) .
+  
+  ***
+  *** if argument evaluates to #f, stop precessing and return #f
+  ***
+  eq k(valList(symbol(#f)) -> apply(mbuiltin('and), V, VL) -> K) 
+   = k(valList(symbol(#f)) -> K) .
+  
+  ***
+  *** else keep processing
+  ***
+  eq k(valList(V') -> apply(mbuiltin('and), V, VL) -> K) 
+   = k(apply(mbuiltin('and), V, VL) -> K)  [owise] .
+  
+  ***
+  *** if all arguments have been evaluated, return the last value
+  ***
+  eq k(valList(V') -> apply(mbuiltin('and), nill) -> K) 
+   = k(valList(V') -> K) .
+
+  ***
+  *** or
+  ***
+  eq k(apply(mbuiltin('or)) -> K) 
+   = k(valList(symbol(#f)) -> K) .
+  eq k(apply(mbuiltin('or), V, VL) -> K) 
+   = k(valList(V) -> evalk -> apply(mbuiltin('or), VL) -> K) .
+  
+  ***
+  *** if argument evaluates to #f, keep processing
+  ***
+  eq k(valList(symbol(#f)) -> apply(mbuiltin('or), V, VL) -> K) 
+   = k(apply(mbuiltin('or), V, VL) -> K) .
+  
+  *** 
+  *** else return the first non-#f value
+  ***
+  eq k(valList(V') -> apply(mbuiltin('or), V, VL) -> K) 
+   = k(valList(V') -> K)  [owise] .
+  
+  ***
+  *** if all arguments have been evaluated, return the last value
+  ***
+  eq k(valList(V') -> apply(mbuiltin('or), nill) -> K) 
+   = k(valList(V') -> K) .
+
+  ***
+  *** number comparison
+  ***
+  eq k(apply(fbuiltin('=), int(I1), int(I2)) -> K) 
+   = k(valList(if  I1 == I2 then symbol(#t) else symbol(#f)  fi) -> K) .
+  eq k(apply(fbuiltin('/=), int(I1), int(I2)) -> K) 
+   = k(valList(if  I1 == I2 then symbol(#f) else symbol(#t)  fi) -> K) .
+ 
+  ops lt lte gt gte : Bool Int ValueList -> ComputationItem .
+
+  ***
+  *** less than
+  ***
+  eq k(apply(fbuiltin('<), nill) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('<), V, nill) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('<), int(I1), VL) -> K)
+   = k(lt(true, I1, VL) -> K) .
+  eq k(lt(B, I1, int(I2), VL) -> K)
+   = k(lt(B and (I1 < I2), I2, VL) -> K) .
+  eq k(lt(B, I1, nill) -> K)
+   = k(valList(if  B then symbol(#t) else symbol(#f)  fi) -> K) .
+
+  ***
+  *** less than or equal
+  ***
+  eq k(apply(fbuiltin('<=), nill) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('<=), V, nill) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('<=), int(I1), VL) -> K)
+   = k(lte(true, I1, VL) -> K) .
+  eq k(lte(B, I1, int(I2), VL) -> K)
+   = k(lte(B and (I1 <= I2), I2, VL) -> K) .
+  eq k(lte(B, I1, nill) -> K)
+   = k(valList(if  B then symbol(#t) else symbol(#f)  fi) -> K) .
+
+  ***
+  *** greater than
+  ***
+  eq k(apply(fbuiltin('>), nill) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('>), V, nill) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('>), int(I1), VL) -> K)
+   = k(gt(true, I1, VL) -> K) .
+  eq k(gt(B, I1, int(I2), VL) -> K)
+   = k(gt(B and (I1 > I2), I2, VL) -> K) .
+  eq k(gt(B, I1, nill) -> K)
+   = k(valList(if  B then symbol(#t) else symbol(#f)  fi) -> K) .
+
+  ***
+  *** greater than or eqaul
+  ***
+  eq k(apply(fbuiltin('>=), nill) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('>=), V, nill) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('>=), int(I1), VL) -> K)
+   = k(gte(true, I1, VL) -> K) .
+  eq k(gte(B, I1, int(I2), VL) -> K)
+   = k(gte(B and (I1 >= I2), I2, VL) -> K) .
+  eq k(gte(B, I1, nill) -> K)
+   = k(valList(if  B then symbol(#t) else symbol(#f)  fi) -> K) .
+endm
+
+*****************************************************************
+mod DEFINE-SEMANTICS is
+  including EVAL-SEMANTICS .
+  var X Y : Name .  var V : Value . var Mem : Store .
+  var K : Computation .  vars Env GEnv : Env .  var L L1 L2 : Location .
+  var VL : ValueList .
+
+  ***
+  *** this is the 'defun' version of define which looks like
+  *** [define [f x y z ...] b], where b is the body, x y z are params
+  *** we turn the whole list to names, and rewrite this as lambda
+  *** stored to the first element of the list (e.g. f, from above)
+  ***
+  *** should replace with macro evnetually
+  ***
+  eq k(apply(mbuiltin('define), cell({L1 . L2}), VL) -> K) 
+     mem(Mem [L1, symbol(X)])   
+   = k(apply(mbuiltin('lambda), (Mem[L2]), VL) -> globalBindTo(X) 
+       -> valList(symbol(unspecified)) -> K) mem(Mem [L1, symbol(X)]) . 
+  
+  ***
+  *** always create a new variable
+  *** else create a new variable in the global environment with the
+  *** value of the evaluated argument V.
+  ***
+  eq k(apply(mbuiltin('define), symbol(X), V) -> K) 
+   = k(valList(V) -> evalk -> globalBindTo(X) -> valList(symbol(unspecified)) -> K) .
+endm
+
+*****************************************************************
+mod SET!-SEMANTICS is
+  including EVAL-SEMANTICS .
+  vars  X X1 X2 Y : Name .  vars V V1 V2 V3 : Value .  vars C1 C2 : ConsCell .  
+  var VL : ValueList . var K : Computation .  vars Env GEnv : Env .  
+  var L L1 L2 : Location .  var Mem : Store . var XL XL' XL'' : NameList .
+
+  ***
+  *** if the symbol exists as a variable in the current environment,
+  *** change the value and return unspecified
+  ***
+  eq k(apply(mbuiltin('set!), symbol(X), V) -> K)  env([X,L] Env) 
+     globalenv(GEnv) fbuiltins(XL) mbuiltins(XL')
+   = k(valList(V) -> evalk -> assignTo(X) -> valList(symbol(unspecified)) -> K)  
+     env([X,L] Env) globalenv(GEnv) fbuiltins(XL) mbuiltins(XL') .
+
+  ***
+  *** else if the symbol exists as a variable in the global environment,
+  *** change the value and return the unspecified. 
+  ***
+  eq k(apply(mbuiltin('set!), symbol(X), V) -> K)  env(Env) 
+     globalenv([X,L] GEnv) fbuiltins(XL) mbuiltins(XL')
+   = k(valList(V) -> evalk -> globalAssignTo(X)  -> valList(symbol(unspecified)) -> K)  
+     env(Env) 
+     globalenv([X,L] GEnv) fbuiltins(XL) mbuiltins(XL') [owise] .
+
+  ***
+  *** else keyword
+  *** use globalBindTo becuase a keyword should always be first bound
+  *** in the globalenv.  This is only needed because of our lazy binding 
+  *** of keywords
+  ***
+  *** fbuiltin
+  ***
+  eq k(apply(mbuiltin('set!), symbol(X), V) -> K)  env(Env) 
+     globalenv(GEnv) fbuiltins(XL, X, XL') mbuiltins(XL'')
+   = k(valList(V) -> evalk -> globalBindTo(X)  -> valList(symbol(unspecified)) -> K)  env(Env) 
+     globalenv(GEnv) fbuiltins(XL, X, XL') mbuiltins(XL'') [owise] .
+
+  ***
+  *** mbuiltin
+  ***
+  ---eq k(apply(mbuiltin('set!), symbol(X), V) -> K)  env(Env) 
+  ---   globalenv(GEnv) fbuiltins(XL) mbuiltins(XL', X, XL'')
+  --- = k(valList(V) -> evalk -> globalBindTo(X)  -> valList(symbol(unspecified)) -> K)  env(Env) 
+  ---   globalenv(GEnv) fbuiltins(XL) mbuiltins(XL', X, XL'') [owise] .
+
+  ***
+  *** else throw unbound variable error
+  ***
+  eq k(apply(mbuiltin('set!), symbol(X), V) -> K) env(Env)
+     globalenv(GEnv) fbuiltins(XL) mbuiltins(XL')
+   = UnboundVariable(X) env(Env) 
+     globalenv(GEnv) fbuiltins(XL) mbuiltins(XL') [owise] .
+ endm
+
+*****************************************************************
+mod LIST-OPERATIONS-SEMANTICS is
+  including EVAL-SEMANTICS .
+  vars V V' : Value .  vars L L' L'' L1 L2 : Location .
+  var K : Computation .  var Mem : Store . var N N' : Nat . 
+  var LA : LocationArray .
+
+  ***
+  *** car value
+  ***
+  eq k(apply(fbuiltin('car), cell({L . L'})) -> K) mem(Mem) 
+   = k(valList(Mem[L]) -> K) mem(Mem) .
+
+  ***
+  *** cdr value
+  ***
+  eq k(apply(fbuiltin('cdr), cell({L . L'})) -> K) mem(Mem) 
+   = k(valList(Mem[L']) -> K) mem(Mem) .
+
+  ***
+  *** set-car! and set-cdr!
+  ***
+  eq k(apply(fbuiltin('set-car!),cell({L1 . L2}),V) -> K) 
+   = k(valList(V) -> assignToLoc(L1) -> valList(symbol(unspecified)) -> K) .
+
+  eq k(apply(fbuiltin('set-cdr!),cell({L1 . L2}),V) -> K) 
+   = k(valList(V) -> assignToLoc(L2) -> valList(symbol(unspecified)) -> K) .
+endm
+
+*****************************************************************
+mod PREDICATE-SEMANTICS is
+  including EVAL-SEMANTICS .
+  var I : Int .  var X X' : Name .  var S : String .  var C : ConsCell .  
+  var V V' : Value .  vars L L' L1 L2 L3 L4 : Location .
+  var K : Computation .  var Mem : Store .  var Env GEnv : Env .
+  var XL : NameList . var VL : ValueList . var Ch : Char .
+  var N N1 N2 N3 N4 : Nat . var LA LA1 LA2 : LocationArray .
+
+  ***
+  *** null?
+  ***
+  eq k(apply(fbuiltin('null?), V) -> K)  = 
+     k(valList(if  V == symbol(nil) then symbol(#t) else symbol(#f)  fi) -> K) .
+
+  ***
+  *** type predicates
+  ***
+  *** boolean?
+  ***
+  eq k(apply(fbuiltin('boolean?), symbol(#t)) -> K)  = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('boolean?), symbol(#f)) -> K)  = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('boolean?), V) -> K)  = k(valList(symbol(#f)) -> K)  [owise] .
+
+  ***
+  *** symbol?
+  ***
+  eq k(apply(fbuiltin('symbol?), symbol(#t)) -> K)  = k(valList(symbol(#f)) -> K) .
+  eq k(apply(fbuiltin('symbol?), symbol(#f)) -> K)  = k(valList(symbol(#f)) -> K) .
+  eq k(apply(fbuiltin('symbol?), symbol(nil)) -> K)  = k(valList(symbol(#f)) -> K) .
+  eq k(apply(fbuiltin('symbol?), symbol(nilVec)) -> K)  = k(valList(symbol(#f)) -> K) .
+  eq k(apply(fbuiltin('symbol?), symbol(nilStr)) -> K)  = k(valList(symbol(#f)) -> K) .
+  eq k(apply(fbuiltin('symbol?), symbol(X)) -> K)  = k(valList(symbol(#t)) -> K) [owise] .
+  eq k(apply(fbuiltin('symbol?), V) -> K)  = k(valList(symbol(#f)) -> K)  [owise] .
+
+  ***
+  *** char?
+  ***
+  eq k(apply(fbuiltin('char?), char(Ch)) -> K)  
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('char?), V) -> K)  = k(valList(symbol(#f)) -> K)  [owise] .
+
+  ***
+  *** number?
+  ***
+  eq k(apply(fbuiltin('number?), int(I)) -> K)  
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('number?), V) -> K)  = k(valList(symbol(#f)) -> K)  [owise] .
+
+  ***
+  *** vector?
+  ***
+  eq k(apply(fbuiltin('vector?), vector(LA, N)) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('vector?), V) -> K) 
+   = k(valList(symbol(#f)) -> K) [owise] .
+
+  ***
+  *** string?
+  ***
+  eq k(apply(fbuiltin('string?), string(LA, N)) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('string?), V) -> K) 
+   = k(valList(symbol(#f)) -> K) [owise] .
+
+  ***
+  *** pair?
+  ***
+  eq k(apply(fbuiltin('pair?), cell(C)) -> K)
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('pair?), V) -> K)
+   = k(valList(symbol(#f)) -> K) [owise] .
+
+  ***
+  *** procedure?
+  ***
+  eq k(apply(fbuiltin('procedure?), fbuiltin(X)) -> K)  = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('procedure?), fclosure(XL,VL,Env)) -> K)  
+   = k(valList(symbol(#t)) -> K) .
+  eq k(apply(fbuiltin('procedure?), V) -> K)  = k(valList(symbol(#f)) -> K) [owise] .
+endm
+
+mod EQ-PREDICATE-SEMANTICS is
+  including EVAL-SEMANTICS .
+  var I : Int .  var X X' : Name .  var S : String .  var C : ConsCell .  
+  var V V' : Value .  vars L L' L1 L2 L3 L4 : Location .
+  var K : Computation .  var Mem : Store .  var Env GEnv : Env .
+  var XL : NameList . var VL : ValueList . var Ch : Char .
+  var N N1 N2 N3 N4 : Nat . var LA LA1 LA2 : LocationArray .
+
+  ***
+  *** eqv?
+  ***
+
+  eq k(apply(fbuiltin('eqv?), V, V') -> K) 
+   = k(valList(if  V == V' then symbol(#t) else symbol(#f)  fi) -> K) .
+
+  eq k(apply(fbuiltin('eq?), V, V') -> K)
+   = k(valList(if  V == V' then symbol(#t) else symbol(#f)  fi) -> K) .
+
+  op equal : Value Value Store -> Bool .
+  
+  eq k(apply(fbuiltin('equal?), V, V') -> K) mem(Mem)
+   = k(valList(if  equal(V, V', Mem) then symbol(#t) else symbol(#f)  fi) -> K) mem(Mem) .
+
+  eq equal(cell({L1 . L2}), cell({L3 . L4}), Mem) 
+   = equal(Mem[L1], Mem[L3], Mem) and equal(Mem[L2], Mem[L4], Mem) .
+  eq equal(vector([ N1 ; L1 ] LA1, N2), vector([ N1 ; L2 ] LA2, N2), Mem)
+   = equal(Mem[L1], Mem[L2], Mem) 
+     and equal(vector(LA1, N2), vector(LA2, N2), Mem) .
+  eq equal(vector(nill, N1), vector(nill, N1), Mem)
+   = true .
+  eq equal(string([ N1 ; L1 ] LA1, N2), string([ N1 ; L2 ] LA2, N2), Mem)
+   = equal(Mem[L1], Mem[L2], Mem) 
+     and equal(string(LA1, N2), string(LA2, N2), Mem) .
+  eq equal(string(nill, N1), string(nill, N1), Mem)
+   = true .
+  eq equal(V, V', Mem) = V == V' [owise] .
+
+endm
+
+
+*****************************************************************
+mod CONS-SEMANTICS is
+  including EVAL-SEMANTICS .
+  vars V1 V2 : Value .  var C : ConsCell .
+  var K : Computation .  var Mem : Store .
+  
+  eq k(apply(fbuiltin('cons), V1, V2) -> K) 
+   = k(valList(V1, V2) -> makeConsCell -> K) .
+endm
+
+*****************************************************************
+mod APPEND-SEMANTICS is
+  including EVAL-SEMANTICS .
+  op app : Value -> ComputationItem .  
+  op app2 : Value ConsCell -> ComputationItem .  
+
+  vars V V1 V2 : Value .  var C : ConsCell .
+  var K : Computation .  var Mem : Store .  vars L1 L2 L1' L2' : Location .
+
+  ***  
+  *** if the first list is empty, just return the second item
+  ***
+  eq k(apply(fbuiltin('append), symbol(nil), V) -> K) 
+   = k(valList(V) -> K) .
+
+  ***
+  *** 'append is non-destructive, so copy the first list
+  ***
+  eq k(apply(fbuiltin('append), cell(C), V) -> K) 
+   = k(dup(cell(C)) -> app(V)  -> K) .
+
+  ***
+  *** traverse the first list (the copy) to the tail item.
+  *** then replace the tail with the second item
+  ***
+  eq k(valList(cell(C)) -> app(V)  -> K) mem(Mem)
+   = k(valList(cell(C)) -> app2(V,C)  -> K) mem(Mem) .
+  eq k(valList(cell({L1 . L2})) -> app2(V,C)  -> K) mem(Mem[L2,cell({L1' . L2'})]) 
+   = k(valList(cell({L1' . L2'})) -> app2(V,C)  -> K) mem(Mem[L2,cell({L1' . L2'})]) .
+  eq k(valList(cell({L1 . L2})) -> app2(V,C)  -> K) mem(Mem [L2,V2])
+   = k(valList(cell(C)) -> K) mem(Mem [L2,V]) [owise] .
+endm
+
+**************************************************************
+mod DISPLAY-SEMANTICS is
+  including GENERIC-EXP-SEMANTICS .
+  including EVAL-SEMANTICS .
+  including INTTOSTRING .
+
+  var X : Name . var I : Int . vars S S' : String .
+  vars L1 L2 : Location .
+  vars V V1 V2 : Value .   var C : ConsCell .
+  var K K' : Computation . var Mem : Store .
+  var B : Bool .  var O : Output .  var IL : ItemList .
+  var XL : NameList .  var VL : ValueList .  var Env GEnv : Env .
+  var LA : LocationArray . var N N' : Nat . var Ch : Char .
+
+  ***
+  *** the toDisplayout arg indicates whether to display [ and ] when a cell 
+  *** is seen
+  ***
+  op toDisplayout : Bool -> ComputationItem .
+  op vecToString : -> ComputationItem .
+  op strToString : -> ComputationItem . 
+  op prepend  : -> ComputationItem .
+  op prepend  : String -> ComputationItem .
+  op append   : String -> ComputationItem .
+  op displaynext : -> ComputationItem .
+  
+  ***
+  *** make sure vectors print in order
+  ***
+  op index : Nat -> ComputationItem .
+
+  eq k(apply(fbuiltin('display), V) -> K)  
+   = k(valList(V) -> toDisplayout(true) -> displaynext -> K) .
+
+  ---test
+  eq k(valList(hole) -> toDisplayout(true) -> K)
+   = k(valList(displayout("hole")) -> K) .
+  eq k(valList(hole) -> toDisplayout(false) -> K)
+   = k(valList(displayout(". hole")) -> K) .
+
+  eq k(valList(fbuiltin(X)) -> toDisplayout(true) -> K) 
+   = k(valList(displayout("#<primitive-procedure " + Name2String(X) + ">" )) -> K) .
+  eq k(valList(fbuiltin(X)) -> toDisplayout(false) -> K) 
+   = k(valList(displayout(". #<primitive-procedure " + Name2String(X) + ">" )) -> K) .
+
+  eq k(valList(fclosure(XL,VL,Env)) -> toDisplayout(true) -> K) 
+   = k(valList(displayout( "#<procedure #f (" + NameList2String(XL) + ")>" )) -> K) .
+  eq k(valList(fclosure(XL,VL,Env)) -> toDisplayout(false) -> K) 
+   = k(valList(displayout(". #<procedure #f (" + NameList2String(XL) + ")>" )) -> K) .
+
+  ***
+  *** continuation printing
+  ***
+  eq k(valList(continuation(K', Env)) -> toDisplayout(true) -> K) 
+   = k(valList(displayout( "#<continuation>" )) -> K) .
+  eq k(valList(continuation(K', Env)) -> toDisplayout(false) -> K) 
+   = k(valList(displayout(". #<continuation>" )) -> K) .
+
+  ***
+  *** vals printing
+  ***
+  eq k(valList(vals(VL)) -> toDisplayout(true) -> K) 
+   = k(valList(displayout("#<values>")) -> K) .
+  eq k(valList(vals(VL)) -> toDisplayout(false) -> K) 
+   = k(valList(displayout(". #<values>")) -> K) . 
+
+  ***
+  *** environment printing
+  ***
+  eq k(valList(environment(Env, GEnv)) -> toDisplayout(true) -> K) 
+   = k(valList(displayout("#<environment>")) -> K) .
+  eq k(valList(environment(Env, GEnv)) -> toDisplayout(false) -> K) 
+   = k(valList(displayout(". #<environment>")) -> K) . 
+
+
+  ***
+  *** vector printing
+  ***
+  eq k(valList(vector([N ; L1 ] LA, N')) -> toDisplayout(true) -> K) mem(Mem)
+   = k(valList(displayout("#(")) -> prepend -> valList(Mem[L1]) -> toDisplayout(true) 
+       -> prepend -> valList(vector(LA, N')) 
+       -> vecToString -> append(")") -> K) mem(Mem) .
+  eq k(valList(vector([N ; L1 ] LA, N')) -> toDisplayout(false) -> K) mem(Mem)
+   = k(valList(displayout(". #(")) -> prepend -> valList(Mem[L1]) -> toDisplayout(true) 
+       -> prepend -> valList(vector(LA, N')) 
+       -> vecToString -> append(")") -> K) mem(Mem) .
+  eq k(valList(vector([N ; L1 ] LA, N')) -> vecToString -> K) mem(Mem)
+   = k(valList(Mem[L1]) -> toDisplayout(true) -> prepend -> valList(vector(LA, N')) 
+     -> vecToString -> K) mem(Mem) .
+  eq k(valList(vector(nill, N')) -> vecToString -> K)
+   = k(K) .
+
+  eq k(prepend(S) -> append(S') -> K)
+   = k(valList(displayout(S + S')) -> K) .
+
+  ***
+  ***string printing
+  ***
+  eq k(valList(string([N ; L1] LA, N')) -> toDisplayout(true) -> K) 
+     mem(Mem [L1, char(Ch)])
+   = k(valList(displayout("\"" + Ch)) -> valList(string(LA, N')) -> strToString -> K) 
+     mem(Mem [L1, char(Ch)]) . 
+  eq k(valList(string([N ; L1] LA, N')) -> toDisplayout(false) -> K) 
+     mem(Mem [L1, char(Ch)])
+   = k(valList(displayout(". \"" + Ch)) -> valList(string(LA, N')) -> strToString -> K) 
+     mem(Mem [L1, char(Ch)]) . 
+  eq k(valList(string(nill, N'),displayout(S)) -> strToString -> K) 
+     mem(Mem [L1, char(Ch)])
+   = k(valList(displayout(S + "\"")) -> K) mem(Mem [L1, char(Ch)]) .
+  eq k(valList((string([N ; L1] LA, N')),displayout(S)) -> strToString -> K) 
+     mem(Mem [L1, char(Ch)])
+   = k(valList(displayout(S + Ch)) -> valList(string(LA, N')) -> strToString -> K) 
+     mem(Mem [L1, char(Ch)]) [owise] .
+
+
+  eq k(valList(mbuiltin(X)) -> toDisplayout(true) -> K)
+  --- = k(valList(displayout(Name2String(X))) -> K) .
+  --- maybe later
+  = k(valList(displayout("#<syntactic-keyword " + Name2String(X) + ">")) -> K) .
+  eq k(valList(mbuiltin(X)) -> toDisplayout(false) -> K)
+  --- = k(valList(displayout(". " + Name2String(X))) -> K) .
+  = k(valList(displayout(". #<syntactic-keyword " + Name2String(X) + ">")) -> K) .
+
+  eq k(valList(int(I)) -> toDisplayout(true) -> K)
+   = k(valList(displayout(inttoDisplayout(I))) -> K) .
+  eq k(valList(int(I)) -> toDisplayout(false) -> K) 
+   = k(valList(displayout(". " + inttoDisplayout(I))) -> K) .
+
+  eq k(valList(char(Ch)) -> toDisplayout(true) -> K)
+   = k(valList(displayout("#\\" + Ch)) -> K) .
+  eq k(valList(char(Ch)) -> toDisplayout(false) -> K) 
+   = k(valList(displayout(". #\\" + Ch)) -> K) .
+
+  eq k(valList(symbol(X)) -> toDisplayout(true) -> K) 
+   = k(valList(displayout(Name2String(X))) -> K) .
+  eq k(valList(symbol(X)) -> toDisplayout(false) -> K) 
+   = if X == nil then k(valList(displayout("")) -> K) 
+     else k(valList(displayout( ". " + Name2String(X))) -> K) 
+     fi .
+
+  eq k(valList(displayout(S)) -> toDisplayout(true) -> K) 
+    = k(valList(displayout(S)) -> K) .
+  eq k(valList(displayout(S)) -> toDisplayout(false) -> K) 
+   = k(valList(displayout(". " + S)) -> K) .
+
+  eq k(valList(cell({L1 . L2})) -> toDisplayout(false) -> K) mem(Mem) 
+   = k(valList(Mem[L1]) -> toDisplayout(true) -> prepend -> valList(Mem[L2]) 
+       -> toDisplayout(false) -> K) mem(Mem) .
+
+  eq k(valList(cell({L1 . L2})) -> toDisplayout(true) -> K) mem(Mem) 
+   = k(valList(displayout("(")) -> prepend -> valList(Mem[L1]) -> toDisplayout(true) 
+       -> prepend -> valList(Mem[L2]) -> toDisplayout(false) -> append(")") -> K) 
+     mem(Mem) .
+
+  eq k(valList(displayout(S)) -> prepend -> valList(V2) -> toDisplayout(B) -> K) 
+   = k(valList(V2) -> toDisplayout(B) -> prepend(S) -> K) .
+  eq k(valList(displayout(S)) -> prepend -> valList(V2) -> vecToString -> K) 
+   = k(valList(V2) -> vecToString -> prepend(S) -> K) .
+  eq k(valList(displayout(S)) -> prepend -> valList(V2) -> strToString -> K) 
+   = k(valList(V2) -> strToString -> prepend(S) -> K) . 
+
+  ***
+  *** include a space when appending except when starting lists
+  ***
+  eq k(valList(displayout(S')) -> prepend("(") -> K) 
+   = k(valList(displayout("(" + S')) -> K) .
+  eq k(valList(displayout("")) -> prepend(S) -> K) 
+   = k(valList(displayout(S)) -> K) .
+  eq k(valList(displayout(S')) -> prepend(S) -> K) 
+   = k(valList(displayout(S + " " + S')) -> K) [owise] .
+  eq k(prepend(S') -> prepend(S) -> K) 
+   = k(valList(displayout(S + " " + S')) -> K) .
+
+  ***
+  *** include a space when appending except when closing lists
+  ***
+  eq k(valList(displayout(S')) -> append(")") -> K) 
+   = k(valList(displayout(S' + ")")) -> K) .
+  eq k(valList(displayout(S')) -> append(S) -> K) 
+   = k(valList(displayout(S' + " " + S)) -> K) [owise] .
+
+  ***
+  *** append final output to the output list
+  *** display returns unspecified
+  ***
+  eq k(valList(displayout(S)) -> displaynext -> K) output(O)
+   = k(valList(symbol(unspecified)) -> K) output(O : S ) .
+endm
+
+*****************************************************************
+mod LET-SEMANTICS is
+  including EVAL-SEMANTICS .
+
+  op extractbindings(_;_) : ValueList Value -> ComputationItem .
+  op processbindings(_;_;_) : NameList ValueList Value -> ComputationItem .
+  op evalvalues(_;_;_) : NameList ValueList ValueList -> ComputationItem .
+
+  var CA : ConsCell .  var K : Computation .
+  var Env GEnv : Env . var Mem : Store .
+  vars L1 L2 L1' L2' : Location . var X : Name . var XL : NameList .
+  vars V V1 V2 V1' : Value . vars VL VL' VB : ValueList . var B : Bool .
+
+  ***
+  *** place body of let in body operator, as scheme
+  *** allows the body to be a list of expressions that are
+  *** evaulated as if in a begin list, and body
+  *** will handle an internal defines
+  ***
+  eq k(apply(mbuiltin('let), cell(CA), VL) -> K)  env(Env) 
+   = k(extractbindings(nill ; cell(CA)) -> body(VL) 
+     -> kenv(Env) ->  K) env(Env) .
+  eq k(apply(mbuiltin('let), symbol(nil), VL) -> K)   
+   = k(body(VL) -> K) .
+
+  ***
+  *** extract each binding pair (symbol initform) from the list
+  ***
+  eq k(extractbindings(VB ; cell({L1 . L2})) -> K) mem(Mem[L1,V1] [L2,V2])
+   = k(extractbindings(VB,V1 ; V2) -> K) mem(Mem[L1,V1] [L2,V2]) .
+  eq k(extractbindings(VB ; symbol(nil)) -> K)  
+   = k(processbindings(() ; nill ; VB) -> K) .
+
+  ***
+  *** separate the list of binding pairs into a list of names and a list of 
+  *** initforms
+  ***
+  eq k(processbindings(XL ; VL ; cell({L1 . L2}),VB) -> K) 
+     mem(Mem[L1,symbol(X)] [L2,cell({L1' . L2'})] [L1',V1'])
+   = k(processbindings(XL,X ; VL,V1' ; VB) -> K) 
+     mem(Mem[L1,symbol(X)] [L2,cell({L1' . L2'})] [L1',V1']) .
+  
+  eq k(processbindings(XL ; VL ; nill) -> K) 
+   = k(evalvalues(XL ; VL ; nill) -> K) .
+
+  ***
+  *** evaluate the list of initforms into a list of values
+  ***
+  eq k(evalvalues(XL ; V,VL ; VL') -> K) 
+   = k(valList(V) -> evalk -> evalvalues(XL ; VL ; VL') -> K) .
+  eq k(valList(V) -> evalvalues(XL ; VL ; VL') -> K) 
+   = k(evalvalues(XL ; VL ; VL',V) -> K) .
+
+  ***
+  *** bind the values to the symbols
+  ***
+  eq k(evalvalues(XL ; nill ; VL') -> K) 
+   = k(valList(VL') -> bindTo(XL) -> K) .
+endm
+
+*****************************************************************
+mod LET*-SEMANTICS is
+  including LET-SEMANTICS .
+  including EVAL-SEMANTICS .
+
+  var CA : ConsCell .  var K : Computation .
+  var Env GEnv : Env . var Mem : Store .
+  vars L1 L2 : Location .
+  vars V1 V2 : Value . var VL : ValueList .
+  var B : Bool .
+
+  ***
+  *** let* processes the bindings sequentially.  this is equivalent to
+  *** handling each binding separately in successive nested let* forms
+  ***
+  eq k(apply(mbuiltin('let*), cell({L1 . L2}), VL) -> K) mem(Mem) env(Env) 
+   = k(processbindings(() ; nill ; (Mem[L1])) -> apply(mbuiltin('let*), 
+     (Mem[L2]), VL) -> kenv(Env) -> K) mem(Mem) env(Env) .
+ 
+  ***
+  *** place body of let* in body operator, as scheme
+  *** allows the body to be a list of expressions that are
+  *** evaulated as if in a begin list.
+  ***
+  eq k(apply(mbuiltin('let*), symbol(nil), VL) -> K) 
+   = k(body(VL) -> K) .
+endm
+
+*****************************************************************
+mod LETREC-SEMANTICS is
+  including EVAL-SEMANTICS .
+
+  op extractbindingsrec(_;_) : ValueList Value -> ComputationItem .
+  op processbindingsrec(_;_;_) : NameList ValueList Value -> ComputationItem .
+  op evalvaluesrec(_;_;_) : NameList ValueList ValueList -> ComputationItem .
+
+  var CA : ConsCell .  var K : Computation .
+  var Env GEnv : Env . var Mem : Store .
+  vars L1 L2 L1' L2' : Location . var X : Name . var XL : NameList .
+  vars V V1 V2 V1' : Value . vars VL VL' VB : ValueList . var B : Bool .
+
+  ***
+  *** place body of let in body operator, as scheme
+  *** allows the body to be a list of expressions that are
+  *** evaulated as if in a begin list.
+  ***
+  eq k(apply(mbuiltin('letrec), cell(CA), VL) -> K)  env(Env)  
+   = k(extractbindingsrec(nill ; cell(CA)) -> body(VL) 
+     -> kenv(Env) -> K)  env(Env) . 
+  eq k(apply(mbuiltin('letrec), symbol(nil), VL) -> K)  
+   = k(body(VL) -> K) .
+
+  ***
+  *** extract each binding pair (symbol initform) from the list
+  ***
+  eq k(extractbindingsrec(VB ; cell({L1 . L2})) -> K) mem(Mem[L1,V1] [L2,V2])
+   = k(extractbindingsrec(VB,V1 ; V2) -> K) mem(Mem[L1,V1] [L2,V2]) .
+  eq k(extractbindingsrec(VB ; symbol(nil)) -> K)  
+   = k(processbindingsrec(() ; nill ; VB) -> K) .
+
+  ***
+  *** separate the list of binding pairs into a list of names and a list of 
+  *** initforms
+  ***
+  eq k(processbindingsrec(XL ; VL ; cell({L1 . L2}),VB) -> K) 
+     mem(Mem[L1,symbol(X)] [L2,cell({L1' . L2'})] [L1',V1'])
+   = k(processbindingsrec(XL,X ; VL,V1' ; VB) -> K) 
+     mem(Mem[L1,symbol(X)] [L2,cell({L1' . L2'})] [L1',V1']) .
+  eq k(processbindingsrec(XL ; VL ; nill) -> K) 
+   = k(nilBindTo(XL) -> evalvaluesrec(XL ; VL ; nill) -> K) .
+
+  ***
+  *** evaluate the list of initforms into a list of values
+  *** the first XL is a list that we will iterate through to initialize
+  ***
+  eq k(evalvaluesrec(XL ; V,VL ; VL') -> K) 
+   = k(valList(V) -> evalk -> evalvaluesrec(XL ; VL ; VL') -> K) .
+  eq k(valList(V) -> evalvaluesrec(XL ; VL ; VL') -> K) 
+   = k(evalvaluesrec(XL ; VL ; VL',V) -> K) .
+
+  ***
+  *** bind the values to the symbols
+  ***
+  eq k(evalvaluesrec(XL ; nill ; VL') -> K) 
+   = k(valList(VL') -> assignTo(XL) -> K) .
+endm
+
+*****************************************************************
+mod APPLY-SEMANTICS is
+  including EVAL-SEMANTICS .
+  vars VFunc VLast : Value .  var VMid : ValueList .
+  var K : Computation .  var Mem : Store .
+  
+  ***
+  *** the last argument must be a list, and all other arguments are consed onto it
+  *** the first arg must be a function
+  ***
+  eq k(apply(fbuiltin('apply), VFunc, VMid, VLast) -> K) mem(Mem) 
+   = k(apply(VFunc, VMid, list2Values(VLast, Mem)) -> K) mem(Mem) .
+endm
+
+*****************************************************************
+***
+*** Define the syntax of Scheme macros.
+***
+*** Note: This is a (very) initial implementation which is still missing some
+*** features from the R5 standard. It is currently flexible enough to handle
+*** standard macros for or and let.
+***
+*** TODO
+*** 1. Add support in patterns for improper lists
+*** 2. Add support in patterns for vectors
+*** 3. Improve error handling
+*** 4. Add support in substitution for multiple ellipses in a row ** currently
+***    only one in a row is supported, although patterns like (X ...) ... work;
+***    patterns like X ... ... are problematic
+***
+****************************************************************               
+mod DEFINE-SYNTAX-SEMANTICS is
+  including EVAL-SEMANTICS .
+  var X Y : Name .  vars V V' : Value . var Mem : Store .
+  var K : Computation .  vars Env Env' GEnv : Env .  var L L1 L2 : Location .
+  var VL : ValueList . var EL : ExpList . vars IL IL' IL'' : ItemList . 
+  vars NL NL' : NameList . vars Li Li' Li'' Lis : List . vars E E' E'' : Exp .  
+  vars N N' N'' M : Nat . var B : Bool .
+
+***  
+*** Define the syntax map and related ops
+***
+  sorts SynMap SynMapEntry .
+  subsort SynMapEntry < SynMap .
+  
+  op [_,_] : Name Value -> SynMapEntry .
+  op empty : -> SynMap .
+  op __ : SynMap SynMap -> SynMap [assoc comm id: empty] .
+  op _[_] : SynMap Name -> Value .
+  op _[_<-_] : SynMap Name Value -> SynMap .
+  
+  vars Sm Sm' : SynMapEntry . vars SM SM' : SynMap .
+  
+  eq ([X,V] SM)[X] = V .
+  eq ([X,V] SM)[X <- V'] = ([X,V'] SM) .
+  eq SM[X <- V] = (SM [X,V]) [owise] .
+
+***
+*** Allow a syntax map as part of the state
+***  
+  op synmap : SynMap -> PLStateAttribute .
+   
+***
+*** Add name X to the map of active syntax transformers
+***     
+  op addToSynMap_ : Name -> ComputationItem .
+  eq k(valList(V) -> addToSynMap(X) -> K) synmap(SM) =
+     k(K) synmap(SM[X <- V]) .
+  
+***
+*** Recover the map of syntax transformations
+***  
+  op wrapSynMap : SynMap -> ComputationItem .
+  eq k(wrapSynMap(SM) -> K) synmap(SM') =
+     k(K) synmap(SM) .
+   
+***
+*** Given an expression, process any syntax transformations
+***
+  op transform : ExpList -> ComputationItem .
+  
+  eq k(transform([ 'define-syntax X Li ]) -> K) = 
+     k(buildTransform(Li) -> addToSynMap(X) -> valList(symbol(unspecified)) -> K) .
+     
+  eq k(transform( () ) -> K) = 
+     k(expList(()) -> K) .
+     
+  eq k(transform( EL ) -> K) synmap(SM) = 
+     k(expList(applySyntax(EL,SM)) -> K) synmap(SM) [owise] .
+  
+***
+*** Apply syntax transforms. We have three ops to do this ** one takes lists
+*** of expressions and applies syntax to each, one applies syntax to a specific
+*** expression until no more changes occur, and the last applies "one step"
+*** of syntax transformation.
+***
+  op applySyntax : ExpList SynMap -> ExpList .
+  op applyToExp : Exp SynMap -> Exp .
+  op applyOneStep : Exp SynMap -> Exp .
+  
+  eq applySyntax ( (E, EL), SM ) = applyToExp(E, SM), applySyntax(EL, SM) .
+  eq applySyntax ( E, SM ) = applyToExp(E, SM) .
+  eq applySyntax ( (), SM) = () .
+  
+ ceq applyToExp(E,SM) = applyToExp(E',SM)
+  if E' := applyOneStep(E,SM) /\ E =/= E' .
+ eq applyToExp(E,SM) = E [owise] .
+
+  eq applyOneStep([ X ], ([X, builtRules( Li ) ] SM)) =
+     tryRules ( [], Li ) .
+  eq applyOneStep([ X IL ], ([X, builtRules( Li ) ] SM)) =
+     tryRules ( [ IL ], Li ).
+ ceq applyOneStep([ Li IL ], SM) = [ Li' IL ]
+  if Li' := applyOneStep(Li, SM) /\ Li =/= Li' .
+  eq applyOneStep( [ E IL ], SM) = [ E applyToList(IL, SM) ] [owise] .
+  eq applyOneStep( [], SM) = [] .
+  eq applyOneStep( [IL . E], SM) = [IL . E] .
+  eq applyOneStep( E, SM) = E [owise] .
+
+***
+*** Apply the above steps over a list of terms until we change one
+***       
+  op applyToList : ItemList SynMap -> ItemList .
+  eq applyToList( Li, SM) = applyOneStep(Li, SM) .
+ ceq applyToList( Li IL, SM) = E' IL
+     if E' := applyOneStep(Li, SM) /\ Li =/= E' .
+ ceq applyToList( Li IL, SM) = Li applyToList(IL, SM)
+     if E' := applyOneStep(Li, SM) /\ Li == E' .
+ ceq applyToList ( E IL, SM) = E applyToList(IL, SM)
+     if isList(E) == false .
+ ceq applyToList ( E, SM) = E
+     if isList(E) == false .
+ 
+***
+*** Actually try a rule. This is needed because a single syntax definition 
+*** could have multiple pattern/template pairs, so we need to try each until 
+*** we have a match. Note: We are assuming a match here, and need to improve 
+*** error handling to handle cases that do not match (this will just get 
+*** "stuck" at this point).                                                    
+*** 
+  op tryRules : List List -> Exp .
+ ceq tryRules ( Li, [ [ Li' E] IL' ] ) = E'
+     if [| MPs : B |] := match( Li, Li', nopairs) /\ B == true 
+        /\ [ E'' ] := preproc( [ E ], []) /\ E' := subst(E'', [], 1, MPs) .
+  eq tryRules ( Li, [ [ Li' E] IL' ] ) = tryRules ( Li, [ IL' ] ) [owise] .
+ ceq tryRules ( Li, [ [ Li' E] ] ) = E'
+     if [| MPs : B |] := match( Li, Li', nopairs) /\ B == true 
+        /\ [ E'' ] := preproc( [ E ], []) /\ E' := subst(E'', [], 1, MPs) .
+*** TODO: Need a case for when we run out of patterns to try ** this is a 
+*** failure case
+     
+   
+***
+*** Build the transformers for syntax-rules
+***
+  op buildTransform : List -> ComputationItem .
+  
+  eq k(buildTransform([ 'syntax-rules [ IL' ] IL]) -> K) =
+     k(buildRules([ IL ], [], itemListToNameList(IL')) -> K) .
+     
+  eq k(buildTransform([ 'syntax-rules [] IL]) -> K) =
+     k(buildRules([ IL ], [], ()) -> K) .
+
+***
+*** Build each transformer rule in turn (each rule under syntax-rules).
+*** builtRules wraps these so they can be assigned to the name
+*** of the transformer.
+***       
+  op buildRules : List List NameList -> ComputationItem .
+  op builtRules : List -> Value .
+     
+  eq k(buildRules([ Li IL ], Li', NL) -> K) =
+     k(buildRule( Li, NL) -> buildRules([ IL ], Li', NL) -> K) .
+
+  eq k(buildRules([ Li ], Li', NL) -> K) =
+     k(buildRule( Li, NL) -> buildRules([], Li', NL) -> K) .
+     
+  eq k(buildRules([], Li, NL) -> K) =
+     k(valList(builtRules(Li)) -> K) .
+     
+*** put this in a continuation to stop evaluation, since no reductions
+*** are defined for this
+  op sticky : -> ComputationItem . 
+     
+***
+*** Build an individual rule: rules are of the form (pattern template),        
+*** so this involves processing the pattern and just saving the template.
+*** Note that for the pattern we just throw away the first name, which
+*** is ignored and is usually just represented with _, like in (_ x ...).
+***          
+  op buildRule : List NameList -> ComputationItem .
+  op builtRule : List -> ComputationItem .
+          
+  eq k(buildRule( [ [X IL] E ], NL) -> K) =
+     k(builtRule( [trans(preproc([ IL ], []),[],NL,false) E]) -> K) .
+  eq k(buildRule( [ [ X ] E ], NL) -> K) =
+     k(builtRule( [ [] E ] ) -> K) .
+***
+*** When a rule is build'ing, it it stored as a builtRule. These
+*** equations put the built rules back in to the list of all rules
+*** build'ing for this definition.
+***          
+  eq k(builtRule(Li) -> buildRules(Li', [], NL) -> K) =
+     k(buildRules(Li',[ Li ], NL) -> K) .
+     
+  eq k(builtRule(Li) -> buildRules(Li', [ IL ], NL) -> K) =
+     k(buildRules(Li', [ IL Li ], NL) -> K) .
+
+*****************************************************************
+***
+*** Process pattern in clause
+***
+*** This will identify all pattern variables and literals
+*** NOTE: We get a large number of cases because ItemList lacks an identity.
+***
+*** patVar defines a new list item to represent a pattern variable, with
+***        Nat representing the number of following ellipses
+***
+*** repVar defines a new list item to represent a repeating variable, with
+***        Nat representing the number of following ellipses
+***
+*** phName defines a new list item to represent a placeholder name
+***
+*** repLst defines a new list item to represent a repeating list, with
+***        Nat representing the number of following ellipses
+***
+*** trans is an operation that transforms the pattern into an annotated
+***       pattern which can be more easily used during matching; the first
+***       list is the list being transformed, the second is the already
+***       processed part of the first, the namelist contains literal
+***       placeholder names, and the bool is true if the list starts
+***       with ... and false otherwise (this is needed because lists
+***       starting with ... escape other ...'s)
+***
+*** ellipses defines a new list item to represent a list of ellipses, with
+***          nat being the length of the list
+***
+*** NOTE: In the pattern, there should never be multiple ellipses in a row
+***       unless list starts with an ellipses, while this is fine in the
+***       pattern.
+***
+*** TODO: Need to handle cases with lists starting with ellipses
+*** TODO: Need to handle dotted lists, vectors
+***
+*****************************************************************
+
+  op patVar   : Name Nat                -> Item .
+  op repVar   : Name Nat                -> Item .
+  op phName   : Name                    -> Item .
+  op repLst   : List Nat                -> Item .
+  op trans    : List List NameList Bool -> List .
+  op ellipses : Nat                     -> Item .
+  
+***
+*** Preprocess ** collapse all ellipses into one with a number indicating
+*** how many there were ** so, ... becomes ellipses(1), while
+*** ... ... ... would be ellipses(3)
+***
+ op preproc : List List -> List .
+ eq preproc ( [ '... IL ] , []      ) 
+  = preproc ( [ IL ] , [     ellipses(1) ] ) .    
+ eq preproc ( [ '... IL ] , [ IL' ] ) 
+  = preproc ( [ IL ] , [ IL' ellipses(1) ] ) .    
+ eq preproc ( [ '...    ] , []      ) 
+  = preproc ( []     , [     ellipses(1) ] ) .    
+ eq preproc ( [ '...    ] , [ IL' ] ) 
+  = preproc ( []     , [ IL' ellipses(1) ] ) .
+     
+ eq preproc ( [ Li   IL ] , []      ) 
+  = preproc ( [ IL ] , [ preproc(Li,[])      ] ) .
+ eq preproc ( [ Li   IL ] , [ IL' ] ) 
+  = preproc ( [ IL ] , [ IL' preproc(Li,[])  ] ) .
+ eq preproc ( [ Li      ] , []      ) 
+  = preproc ( []     , [ preproc(Li,[])      ] ) .
+ eq preproc ( [ Li      ] , [ IL' ] ) 
+  = preproc ( []     , [ IL' preproc(Li,[])  ] ) .
+ 
+ eq preproc ( [ E    IL ] , []      ) 
+  = preproc ( [ IL ] , [ E     ] ) [owise] .
+ eq preproc ( [ E    IL ] , [ IL' ] ) 
+  = preproc ( [ IL ] , [ IL' E ] ) [owise] .
+ eq preproc ( [ E       ] , []      ) 
+  = preproc ( []     , [ E     ] ) [owise] .
+ eq preproc ( [ E       ] , [ IL' ] ) 
+  = preproc ( []     , [ IL' E ] ) [owise] .
+
+ eq preproc ( [], Li) = Li .
+  
+*** collapse adjacent ellipses
+ eq ellipses(N) ellipses(N') = ellipses(N + N') .
+  
+***
+*** Case 1: Name is one of literals, mark as placeholder
+***
+ ceq trans ( [ X I IL ] , [ IL'           ] , NL, B ) =
+     trans ( [   I IL ] , [ IL' phName(X) ] , NL, B )
+  if nameIn(X,NL) == true .
+
+ ceq trans ( [ X I IL ] , []           , NL, B ) =
+     trans ( [   I IL ] , [ phName(X) ] , NL, B )
+  if nameIn(X,NL) == true .
+
+ ceq trans ( [ X I ] , [ IL'           ] , NL, B ) =
+     trans ( [   I ] , [ IL' phName(X) ] , NL, B )
+  if nameIn(X,NL) == true .
+
+ ceq trans ( [ X I ] , []           , NL, B ) =
+     trans ( [   I ] , [ phName(X) ] , NL, B )
+  if nameIn(X,NL) == true .
+
+ ceq trans ( [ X ] , [ IL'           ] , NL, B ) =
+     trans ( [] , [ IL' phName(X) ] , NL, B )
+  if nameIn(X,NL) == true .
+
+ ceq trans ( [ X ] , []           , NL, B ) =
+     trans ( [] , [ phName(X) ] , NL, B )
+  if nameIn(X,NL) == true .
+        
+***  
+*** Case 2: Name is not a literal and not followed by ...,
+*** mark as non-repeating pattern variable. 
+***  
+ ceq trans ( [ X I IL ] , [ IL'           ] , NL, B ) =
+     trans ( [   I IL ] , [ IL' patVar(X,0) ] , NL, B )
+  if nameIn(X,NL) == false /\ isEllipses(I) == false .
+
+ ceq trans ( [ X I IL ] , []           , NL, B ) =
+     trans ( [   I IL ] , [ patVar(X,0) ] , NL, B )
+  if nameIn(X,NL) == false /\ isEllipses(I) == false .
+
+ ceq trans ( [ X I ] , [ IL'           ] , NL, B ) =
+     trans ( [   I ] , [ IL' patVar(X,0) ] , NL, B )
+  if nameIn(X,NL) == false /\ isEllipses(I) == false .
+
+ ceq trans ( [ X I ] , []           , NL, B ) =
+     trans ( [   I ] , [ patVar(X,0) ] , NL, B )
+  if nameIn(X,NL) == false /\ isEllipses(I) == false .
+
+ ceq trans ( [ X ] , [ IL'           ] , NL, B ) =
+     trans ( [] , [ IL' patVar(X,0) ] , NL, B )
+  if nameIn(X,NL) == false .
+
+ ceq trans ( [ X ] , []           , NL, B ) =
+     trans ( [] , [ patVar(X,0) ] , NL, B )
+  if nameIn(X,NL) == false .
+      
+***
+*** Case 3: Name is not a literal and is followed by ...,
+*** mark as repeating pattern variable.
+***  
+ ceq trans ( [ X ellipses(N) IL ] , [ IL'             ] , NL, B ) =
+     trans ( [               IL ] , [ IL' repVar(X,N) ] , NL, B )
+  if nameIn(X,NL) == false .
+
+ ceq trans ( [ X ellipses(N) IL ] , []              , NL, B ) =
+     trans ( [               IL ] , [ repVar(X,N) ] , NL, B )
+  if nameIn(X,NL) == false .
+
+ ceq trans ( [ X ellipses(N) ]  , [ IL'             ] , NL, B ) =
+     trans ( []                 , [ IL' repVar(X,N) ] , NL, B )
+  if nameIn(X,NL) == false .
+
+ ceq trans ( [ X ellipses(N) ]  , []             , NL, B ) =
+     trans ( []      , [ repVar(X,N) ] , NL, B )
+  if nameIn(X,NL) == false .
+    
+***
+*** Case 4: Element is a list and is not followed by ...,
+*** so we want to recursively process.
+***
+ ceq trans ( [ Li I IL ] , [ IL'     ] , NL, B ) =
+     trans ( [    I IL ] , [ IL' Li' ] , NL, B )
+  if isEllipses(I) == false /\ Li' := trans(Li, [], NL, B ) .
+
+ ceq trans ( [ Li I IL ] , []     , NL, B ) =
+     trans ( [    I IL ] , [ Li' ] , NL, B )
+  if isEllipses(I) == false /\ Li' := trans(Li, [], NL, B ) .
+
+ ceq trans ( [ Li I ] , [ IL'     ] , NL, B ) =
+     trans ( [    I ] , [ IL' Li' ] , NL, B )
+  if isEllipses(I) == false /\ Li' := trans(Li, [], NL, B ) .
+
+ ceq trans ( [ Li I ] , []     , NL, B ) =
+     trans ( [    I ] , [ Li' ] , NL, B )
+  if isEllipses(I) == false /\ Li' := trans(Li, [], NL, B ) .
+
+ ceq trans ( [ Li ] , [ IL'     ] , NL, B ) =
+     trans ( [] , [ IL' Li' ] , NL, B )
+  if Li' := trans(Li, [], NL, B ) .
+
+ ceq trans ( [ Li ] , []     , NL, B ) =
+     trans ( [] , [ Li' ] , NL, B )
+  if Li' := trans(Li, [], NL, B ) .
+        
+***
+*** Case 5: Element is a list and is followed by ...,
+*** so we want to recursively process and mark as repeatable.
+***
+ ceq trans ( [ Li ellipses(N) IL ] , [ IL'               ] , NL, B ) =
+     trans ( [                IL ] , [ IL' repLst(Li',N) ] , NL, B )
+  if Li' := bump(trans(Li, [], NL, B ), N) .
+
+ ceq trans ( [ Li ellipses(N) IL ] , []              , NL, B ) =
+     trans ( [                IL ] , [repLst(Li',N) ] , NL, B )
+  if Li' := bump(trans(Li, [], NL, B ), N) .
+
+ ceq trans ( [ Li ellipses(N) ]  , [ IL'               ] , NL, B ) =
+     trans ( []                  , [ IL' repLst(Li',N) ] , NL, B )
+  if Li' := bump(trans(Li, [], NL, B ), N) .
+
+ ceq trans ( [ Li ellipses(N) ]  , []              , NL, B ) =
+     trans ( []                  , [repLst(Li',N) ] , NL, B )
+  if Li' := bump(trans(Li, [], NL, B ), N) .
+       
+***
+*** When the first list is processed, this means we can return the second
+***
+  eq trans ( [], Li, NL, B ) = Li .
+        
+*****************************************************************
+***
+*** Match pieces of syntax against template
+***
+*** match defines a new operator that performs the match of the actual Scheme
+***       expression against the template. The first list is the expression to
+***       match against, whle the second is the transformed pattern. The third
+***       parameter is a set of match pairs, with each pair containing the name
+***       of the matched variable and the list of matching expressions.
+***
+*****************************************************************
+  sorts MatchPair MatchPairs MatchPairsList MatchPairsXBool .
+  subsort MatchPair < MatchPairs < MatchPairsList .
+  
+  op nopairs : -> MatchPairs .
+  op __ : MatchPairs MatchPairs -> MatchPairs [assoc comm id: nopairs] .
+  
+  op {_,_} : Item ItemList -> MatchPair .
+  op [| _:_ |] : MatchPairs Bool -> MatchPairsXBool .
+  
+  op match : List List MatchPairs -> MatchPairsXBool .
+  
+  vars MPs MPs' MPs'' : MatchPairs . vars MPL MPL' : MatchPairsList .
+  
+***
+*** Case 1: Match an expression to a pattern variable. A pattern
+*** variable will match exactly one item from the list.
+***  
+  eq match( [ E IL ] , [ patVar(X,N) IL' ] , MPs ) =
+     match( [ IL ], [ IL' ], MPs { patVar(X,N), E } ) .
+
+  eq match( [ E ] , [ patVar(X,N) ] , MPs ) =
+     [| MPs { patVar(X,N), E } : true |] .
+
+  eq match( [ E ] , [ patVar(X,N) IL ] , MPs ) =
+     match( [], [ IL ], MPs { patVar(X,N), E } ) .
+
+***     
+*** It is an error if nothing matches the pattern var.
+***
+  eq match( [] , [ patVar(X,N) IL ] , MPs ) =
+     [| MPs : false |] .
+
+  eq match( [] , [ patVar(X,N) ] , MPs ) =
+     [| MPs : false |] .
+                    
+***
+*** Case 2: Match an expression to a repeating variable. Here
+*** we need to check 1) if the remaining lists are the same
+*** length (in which case we are done matching the var), and 2)
+*** if the repeating pattern var is already in the set. Note that
+*** the first check is only needed if we can match in the middle
+*** of a list with a pattern line (a b ... c).
+***      
+ ceq match( [ E IL ] , [ repVar(X,N) IL' ] , MPs ) =
+     match( [ IL ], [ repVar(X,N) IL' ] , MPs { repVar(X,N), E } )
+  if ILLen(IL) > ILLen(IL') /\ MatchIn(repVar(X,N),MPs) == false .   
+  
+ ceq match( [ E IL ] , [ repVar(X,N) ] , MPs ) =
+     match( [ IL ], [ repVar(X,N) ] , MPs { repVar(X,N), E } )
+  if MatchIn(repVar(X,N),MPs) == false .   
+
+ ceq match( [ E IL ] , [ repVar(X,N) IL' ] , MPs ) =
+     match( [ IL ], [ IL' ] , MPs { repVar(X,N), E } )
+  if ILLen(IL) == ILLen(IL') /\ MatchIn(repVar(X,N),MPs) == false .   
+
+ ceq match( [ E ] , [ repVar(X,N) ] , MPs ) =
+     [| MPs { repVar(X,N), E } : true |]
+  if MatchIn(repVar(X,N),MPs) == false .   
+    
+ ceq match( [ IL ] , [ repVar(X,N) IL' ] , MPs ) =
+     match( [ IL ] , [ IL ' ] , MPs )
+  if ILLen(IL) == ILLen(IL') .
+
+  eq match( [] , [ repVar(X,N) ] , MPs ) =
+     [| MPs : true |] .
+    
+ ceq match( [ E IL ] , [ repVar(X,N) IL' ] , { repVar(X,N), IL'' } MPs ) =
+     match( [ IL ], [ repVar(X,N) IL' ] , { repVar(X,N), IL'' E } MPs  )
+  if ILLen(IL) > ILLen(IL') .   
+  
+  eq match( [ E IL ] , [ repVar(X,N) ] , { repVar(X,N), IL'' } MPs ) =
+     match( [ IL ], [ repVar(X,N) ] , { repVar(X,N), IL'' E } MPs  ) .
+  
+ ceq match( [ E IL ] , [ repVar(X,N) IL' ] , { repVar(X,N), IL'' } MPs ) =
+     match( [ IL ], [ IL' ] , { repVar(X,N), IL'' E } MPs  )
+  if ILLen(IL) == ILLen(IL') .   
+  
+  eq match( [ E ] , [ repVar(X,N) ] , { repVar(X,N), IL'' } MPs ) =
+     [| { repVar(X,N), IL'' E  } MPs : true |] .
+     
+***
+*** Case 3: Match an expression to a repeating list.
+***
+ ceq match( [ Li IL ] , [ repLst(Li',N) IL' ] , MPs ) =
+     match( [ IL ], [ repLst(Li',N) IL' ] , mergeMP(MPs, MPs') ) 
+  if ILLen(IL) > ILLen(IL') /\ [| MPs' : B |] := match ( Li, Li', nopairs ) 
+     /\ B == true .   
+  
+ ceq match( [ Li IL ] , [ repLst(Li',N) ] , MPs ) =
+     match( [ IL ], [ repLst(Li',N) ] , mergeMP(MPs, MPs') ) 
+  if [| MPs' : B |] := match ( Li, Li', nopairs ) /\ B == true .   
+
+ ceq match( [ Li IL ] , [ repLst(Li',N) IL' ] , MPs ) =
+     match( [ IL ], [ IL' ] , mergeMP(MPs, MPs') ) 
+  if ILLen(IL) == ILLen(IL') /\ [| MPs' : B |] := match ( Li, Li', nopairs ) 
+     /\ B == true .   
+
+ ceq match( [ Li ] , [ repLst(Li',N) ] , MPs ) =
+     [| mergeMP(MPs, MPs') : true |]
+  if [| MPs' : B |] := match ( Li, Li', nopairs ) /\ B == true .   
+    
+ ceq match( [ IL ] , [ repLst(Li',N) IL' ] , MPs ) =
+     match( [ IL ] , [ IL ' ] , MPs )
+  if ILLen(IL) == ILLen(IL') .
+
+  eq match( [] , [ repLst(Li',N) ] , MPs ) =
+     [| MPs : true |] .
+    
+***
+*** Case 4: Crack open a list
+***
+ ceq match( [ Li IL ], [ Li' IL' ], MPs ) =
+     match( [ IL ], [ IL' ], MPs' )
+  if [| MPs' : B |] := match(Li, Li', MPs) /\ B == true .
+
+  eq match( [ Li ], [ Li' ], MPs ) =
+     match(Li, Li', MPs) .
+
+ ceq match( [ E IL ], [ Li' IL' ], MPs ) =
+     [| MPs : false |]
+  if isList(E) == false .
+
+ ceq match( [ E ] , [ Li' ], MPs ) =
+     [| MPs : false |]
+  if isList(E) == false .
+     
+***
+*** Case 5: Match a literal
+***
+  eq match( [ X IL ], [ phName(X) IL' ], MPs ) =
+     match( [ IL ], [ IL' ], MPs ) .
+     
+  eq match( [ X ], [ phName(X) ], MPs ) =
+     [| MPs : true |] .
+     
+ ceq match( [ Y IL ], [ phName(X) IL' ], MPs ) =
+     [| MPs : false |]
+  if X =/= Y .
+  
+ ceq match( [ Y ], [ phName(X) ], MPs ) =
+     [| MPs : false |]
+  if X =/= Y .
+  
+ ceq match( [ E IL ], [ phName(X) IL' ], MPs ) =
+     [| MPs : false |]
+  if isName(E) == false .
+  
+ ceq match( [ E ], [ phName(X) ], MPs ) =
+     [| MPs : false |]
+  if isName(E) == false .
+
+***
+*** Trivial case ** the empty list matches the empty pattern list
+***
+ eq match( [], [], MPs ) = [| MPs : true |] .
+ eq match( [ IL ], [], MPs ) = [| MPs : false |] .
+   
+*****************************************************************
+***
+*** After matching, perform substitution
+***
+*** TODO: Modify to also return an error code, to allow errors to percolate
+*** back up to the top.
+***
+*****************************************************************
+  op subst : Exp Exp Nat MatchPairs -> Exp .
+  
+  var I' : Item .
+  
+***
+*** Case 1: Non-repeated pattern variables
+***  
+ ceq subst( [ X I IL ], [ IL'      ], M, ( { patVar(X,0), I' } MPs ) ) =
+     subst( [   I IL ], [ IL' I' ], M, ( { patVar(X,0), I' } MPs ) )
+  if isEllipses(I) == false .
+
+ ceq subst( [ X I ], [ IL'      ], M, ( { patVar(X,0), I' } MPs ) ) =
+     subst( [   I ], [ IL' I' ], M, ( { patVar(X,0), I' } MPs ) )
+  if isEllipses(I) == false .
+
+  eq subst( [ X ], [ IL'      ], M, ( { patVar(X,0), I' } MPs ) ) =
+     subst( []   , [ IL' I' ], M, ( { patVar(X,0), I' } MPs ) ) .
+
+ ceq subst( [ X I IL ], []      , M, ( { patVar(X,0), I' } MPs ) ) =
+     subst( [   I IL ], [ I' ], M, ( { patVar(X,0), I' } MPs ) )
+  if isEllipses(I) == false .
+
+ ceq subst( [ X I ], []      , M, ( { patVar(X,0), I' } MPs ) ) =
+     subst( [   I ], [ I' ], M, ( { patVar(X,0), I' } MPs ) )
+  if isEllipses(I) == false .
+
+  eq subst( [ X ], []      , M, ( { patVar(X,0), I' } MPs ) ) =
+     subst( []   , [ I' ], M, ( { patVar(X,0), I' } MPs ) ) .
+
+***
+*** Case 1a: Repeated "non-repeating" pattern variables
+*** These come about from terms like (X)..., versus (X...)
+***
+ ceq subst( [ X I IL ], [ IL'      ], M, ( { patVar(X,N'), IL'' } MPs ) ) =
+     subst( [     IL ], [ IL' stripAllN(IL'',N') ], M, 
+           ({ patVar(X,N'), IL'' } MPs ))
+  if isEllipses(I) == true /\ N' == ellipseLevel(I) .
+
+ ceq subst( [ X I ], [ IL'      ], M, ( { patVar(X,N'), IL'' } MPs ) ) =
+     subst( []     , [ IL' stripAllN(IL'',N') ], M, 
+           ({ patVar(X,N'), IL'' } MPs ))
+  if isEllipses(I) == true /\ N' == ellipseLevel(I) .
+
+ ceq subst( [ X I IL ], []      , M, ( { patVar(X,N'), IL'' } MPs ) ) =
+     subst( [     IL ], [ stripAllN(IL'',N') ], M, 
+           ({ patVar(X,N'), IL'' } MPs ))
+  if isEllipses(I) == true /\ N' == ellipseLevel(I) .
+
+ ceq subst( [ X I ], []      , M, ( { patVar(X,N'), IL'' } MPs ) ) =
+     subst( []     , [ stripAllN(IL'',N') ], M, ( { patVar(X,N'), IL'' } MPs ))
+  if isEllipses(I) == true /\ N' == ellipseLevel(I) .
+
+***
+*** Case 2: Repeated pattern variables
+***
+ ceq subst( [ X I IL ], [ IL'    ], M, ( { repVar(X,N), IL'' } MPs ) ) =
+     subst( [   IL ], [ IL' stripAllN(IL'',(_-_(N,1))) ], M, 
+           ({ repVar(X,N), IL'' } MPs ) )
+  if isEllipses(I) == true /\ N == ellipseLevel(I) .
+
+ ceq subst( [ X I ], [ IL' ], M, ( { repVar(X,N), IL'' } MPs ) ) =
+     subst( [], [ IL' stripAllN(IL'',(_-_(N,1))) ], M, 
+           ({ repVar(X,N), IL'' } MPs ))
+  if isEllipses(I) == true /\ N == ellipseLevel(I) .
+
+ ceq subst( [ X I IL ], []    , M, ( { repVar(X,N), IL'' } MPs ) ) =
+     subst( [   IL ], [ stripAllN(IL'',(_-_(N,1))) ], M, 
+           ({ repVar(X,N), IL'' } MPs ))
+  if isEllipses(I) == true /\ N == ellipseLevel(I) .
+
+ ceq subst( [ X I ], [] , M, ( { repVar(X,N), IL'' } MPs ) ) =
+     subst( [], [ stripAllN(IL'',(_-_(N,1))) ], M, 
+           ({ repVar(X,N), IL'' } MPs ))
+  if isEllipses(I) == true /\ N == ellipseLevel(I) .
+
+ ceq subst( [ X I IL ], [ IL' ], M, ( MPs ) ) =
+     subst( [   IL ], [ IL' ]  , M, ( MPs ) )
+  if isEllipses(I) == true /\ nameInMatch(X,MPs) == false .
+
+ ceq subst( [ X I ], [ IL' ], M, ( MPs ) ) =
+     subst( [], [ IL' ], M, ( MPs ) )
+  if isEllipses(I) == true /\ nameInMatch(X,MPs) == false .
+
+ ceq subst( [ X I IL ], [], M, ( MPs ) ) =
+     subst( [   IL ], [], M, ( MPs ) )
+  if isEllipses(I) == true /\ nameInMatch(X,MPs) == false .
+
+ ceq subst( [ X I ], [], M, ( MPs ) ) =
+     subst( [], [], M, ( MPs ) )
+  if isEllipses(I) == true /\ nameInMatch(X,MPs) == false .
+
+***
+*** Case 2a: Non-repeated "Repeated" pattern variables; these
+***          come from cases where the pattern is like X ...
+***          but the template is like (X)..., meaning X is not
+***          "directly" repeated (and hence not followed by ellipses).
+***
+ ceq subst( [ X I IL ], [ IL'    ], M, ( { repVar(X,0), IL'' } MPs ) ) =
+     subst( [   I IL ], [ IL' IL'' ], M, ( { repVar(X,0), IL'' } MPs ) )
+  if isEllipses(I) =/= true .
+
+ ceq subst( [ X I ], [ IL' ], M, ( { repVar(X,0), IL'' } MPs ) ) =
+     subst( [ I ], [ IL' IL'' ], M, ( { repVar(X,0), IL'' } MPs ) )
+  if isEllipses(I) =/= true .
+
+ ceq subst( [ X I IL ], []    , M, ( { repVar(X,0), IL'' } MPs ) ) =
+     subst( [   I IL ], [ IL'' ], M, ( { repVar(X,0), IL'' } MPs ) )
+  if isEllipses(I) =/= true .
+
+ ceq subst( [ X I ], [] , M, ( { repVar(X,0), IL'' } MPs ) ) =
+     subst( [ I ], [ IL'' ], M, ( { repVar(X,0), IL'' } MPs ) )
+  if isEllipses(I) =/= true .
+
+  eq subst( [ X ], [] , M, ( { repVar(X,0), IL'' } MPs ) ) =
+     subst( [], [ IL'' ], M, ( { repVar(X,0), IL'' } MPs ) ) .
+
+  eq subst( [ X ], [ IL' ] , M, ( { repVar(X,0), IL'' } MPs ) ) =
+     subst( [], [ IL' IL'' ], M, ( { repVar(X,0), IL'' } MPs ) ) .
+  
+***
+*** Case 3: Other tokens
+***
+ ceq subst( [ X IL ], [ IL' ], M, MPs ) =
+     subst( [ IL ], [ IL' X ], M, MPs)
+  if nameInMatch(X,MPs) == false .       
+  
+ ceq subst( [ X ], [ IL' ], M, MPs ) =
+     subst( [], [ IL' X ], M, MPs)
+  if nameInMatch(X,MPs) == false .       
+
+ ceq subst( [ X IL ], [], M, MPs ) =
+     subst( [ IL ], [ X ], M, MPs)
+  if nameInMatch(X,MPs) == false .       
+  
+ ceq subst( [ X ], [], M, MPs ) =
+     subst( [], [ X ], M, MPs)
+  if nameInMatch(X,MPs) == false .       
+
+ ceq subst( [ E IL ], [ IL' ], M, MPs ) =
+     subst( [ IL ], [ IL' E ], M, MPs)
+  if isName(E) == false /\ isList(E) = false .
+  
+ ceq subst( [ E ], [ IL' ], M, MPs ) =
+     subst( [], [ IL' E ], M, MPs)
+  if isName(E) == false /\ isList(E) = false .
+
+ ceq subst( [ E IL ], [], M, MPs ) =
+     subst( [ IL ], [ E ], M, MPs)
+  if isName(E) == false /\ isList(E) = false .
+  
+ ceq subst( [ E ], [], M, MPs ) =
+     subst( [], [ E ], M, MPs)
+  if isName(E) == false /\ isList(E) = false .
+  
+***
+*** Case 4: Crack open non-repeating lists. These do not impact the
+*** nesting of repeating items.
+***
+ ceq subst( [ Li ], [], M, MPs ) = subst( [], [ Li' ], M, MPs)
+  if Li' := subst(Li, [], M, MPs) .
+ ceq subst( [ Li ], [ IL ], M, MPs ) = subst( [], [ IL Li' ], M, MPs)
+  if Li' := subst(Li, [], M, MPs) .
+ ceq subst( [ Li I ], [], M, MPs ) = subst( [ I ], [ Li' ], M, MPs)
+  if isEllipses(I) =/= true /\ Li' := subst(Li, [], M, MPs) .
+ ceq subst( [ Li I ], [ IL' ], M, MPs ) = subst( [ I ], [ IL' Li' ], M, MPs)
+  if isEllipses(I) =/= true /\ Li' := subst(Li, [], M, MPs) .
+ ceq subst( [ Li I IL ], [], M, MPs ) = subst( [ I IL ], [ Li' ], M, MPs)
+  if isEllipses(I) =/= true /\ Li' := subst(Li, [], M, MPs) .
+ ceq subst([ Li I IL ], [ IL' ], M, MPs) = subst([ I IL ], [ IL' Li' ], M, MPs)
+  if isEllipses(I) =/= true /\ Li' := subst(Li, [], M, MPs) .
+ 
+***
+*** Case 5: Repeating lists. These impact the nesting of repeating
+*** items.
+***
+*** TODO: Add support for multiple ellipses after a repeating
+*** list, like ( X ) ... ...
+***
+*** TODO: Add more comments
+***
+ ceq subst( [ Li I ], [], M, MPs ) = subst( [ Li I ], [ Li' ], M + 1, MPs)
+  if isEllipses(I) == true /\ N := ellipseLevel(I) /\
+     MPs' := pairsForTerm(Li,MPs) /\ 
+     M <= maxLen(MPs') /\
+     MPs'' := stripAllInPairsN(unbump(pairsNth(M,MPs'),N),(_-_(N,1))) /\
+     Li' := subst(Li, [], 1, MPs'') .
+  
+ ceq subst([ Li I ], [ IL' ], M, MPs) = subst([ Li I ], [ IL' Li' ], M + 1, MPs)
+  if isEllipses(I) == true /\ N := ellipseLevel(I) /\
+     MPs' := pairsForTerm(Li,MPs) /\ 
+     M <= maxLen(MPs') /\
+     MPs'' := stripAllInPairsN(unbump(pairsNth(M,MPs'),N),(_-_(N,1))) /\
+     Li' := subst(Li, [], 1, MPs'') .
+
+ ceq subst( [ Li I IL ], [], M, MPs ) = subst([ Li I IL ], [ Li' ], M + 1, MPs)
+  if isEllipses(I) == true /\ N := ellipseLevel(I) /\
+     MPs' := pairsForTerm(Li,MPs) /\ 
+     M <= maxLen(MPs') /\
+     MPs'' := stripAllInPairsN(unbump(pairsNth(M,MPs'),N),(_-_(N,1))) /\
+     Li' := subst(Li, [], 1, MPs'') .
+
+ ceq subst( [ Li I IL ], [ IL' ], M, MPs ) 
+   = subst( [ Li I IL ], [ IL' Li' ], M + 1, MPs)
+  if isEllipses(I) == true /\ N := ellipseLevel(I) /\
+     MPs' := pairsForTerm(Li,MPs) /\ 
+     M <= maxLen(MPs') /\
+     MPs'' := stripAllInPairsN(unbump(pairsNth(M,MPs'),N),(_-_(N,1))) /\
+     Li' := subst(Li, [], 1, MPs'') .
+
+ ceq subst( [ Li I ], [], M, MPs ) = subst( [], [], 1, MPs)
+  if isEllipses(I) == true /\ 
+     MPs' := pairsForTerm(Li,MPs) /\ 
+     M > maxLen(MPs') .
+  
+ ceq subst( [ Li I ], [ IL' ], M, MPs ) = subst( [], [ IL' ], 1, MPs)
+  if isEllipses(I) == true /\ 
+     MPs' := pairsForTerm(Li,MPs) /\ 
+     M > maxLen(MPs') .
+
+ ceq subst( [ Li I IL ], [], M, MPs ) = subst( [ IL ], [], 1, MPs)
+  if isEllipses(I) == true /\ 
+     MPs' := pairsForTerm(Li,MPs) /\ 
+     M > maxLen(MPs') .
+
+ ceq subst( [ Li I IL ], [ IL' ], M, MPs ) = subst( [ IL ], [ IL' ], 1, MPs)
+  if isEllipses(I) == true /\ 
+     MPs' := pairsForTerm(Li,MPs) /\ 
+     M > maxLen(MPs') .
+     
+***
+*** Case 6: Non-lists
+*** 
+*** Note: We make them into lists to repeat processing above, then just strip
+*** off their "list-ness"
+***
+ ceq subst( E, E', M, MPs) = E''
+  if isList(E) == false /\ [ E'' ] := subst( [ E ], E', M, MPs) .
+
+***
+*** End case ** when initial list is cleared, just return the resulting 
+*** expression
+***  
+  eq subst([], E, M, MPs) = E .
+  
+*****************************************************************
+***
+*** Helpers. These are used in the syntax manipulation operations above.
+***
+*****************************************************************
+
+***
+*** Determine if a given name is in the name list
+***   
+  op nameIn : Name NameList -> Bool .
+  eq nameIn (X, ( X, NL)) = true .
+  eq nameIn (X, ()) = false .
+  eq nameIn (X, ( Y, NL)) = nameIn (X, NL) [owise] .
+  
+***
+*** Calculate the length of an item list.
+***  
+  var I : Item .
+  op ILLen : ItemList -> Nat .
+  eq ILLen(I IL) = 1 + ILLen(IL) .
+  eq ILLen(I) = 1 .
+  
+***
+*** Determine if an item is in the set of Match Pairs
+***
+  op MatchIn : Item MatchPairs -> Bool .
+  eq MatchIn(I, {I,IL} MPs) = true .
+  eq MatchIn(I, MPs) = false [owise] .
+
+***
+*** Given an item, determine if it is a name
+***  
+  op isName : Item -> Bool .
+  eq isName(X) = true .
+  eq isName(I) = false [owise] .
+  
+***
+*** Given an item, determine if it is a list
+***  
+  op isList : Item -> Bool .
+  eq isList(Li) = true .
+  eq isList(I) = false [owise] .
+  
+***
+*** Merge two sets of match pairs. Note that we assume
+*** those in the second set were generated by a match
+*** inside a list, so we wrap the Item Lists from this
+*** second set in list brackets, [], first.
+***  
+  op mergeMP : MatchPairs MatchPairs -> MatchPairs .
+  eq mergeMP( { repVar(X,N), IL } MPs, { repVar(X,N), IL' } MPs' ) =
+     mergeMP( { repVar(X,N), IL [ IL' ] } MPs, MPs' ) .
+  eq mergeMP( { patVar(X,N), IL } MPs, { patVar(X,N), IL' } MPs' ) =
+     mergeMP( { patVar(X,N), IL [ IL' ] } MPs, MPs' ) .
+  eq mergeMP(MPs,MPs') = MPs bracket(MPs') [owise] .
+
+***
+*** Determine if a specific name is in the MatchPairs set.
+*** This differs from MatchIn because we want to find
+*** any item with name X, versus finding a specific
+*** item such as patVar(X,1)
+***  
+  op nameInMatch : Name MatchPairs -> Bool .
+  eq nameInMatch( X, { repVar(X,N), IL } MPs) = true .
+  eq nameInMatch( X, { patVar(X,N), IL } MPs) = true .
+  eq nameInMatch( X, MPs) = false [owise] .
+  
+***
+*** Wrap all item lists in the set with list brackets.
+***  
+  op bracket : MatchPairs -> MatchPairs .
+  eq bracket(MPs) = bracketEach(MPs,nopairs) .
+  
+***
+*** Wrap all item lists in the set with list brackets; this
+*** is a helper operation for bracket.
+***
+  op bracketEach : MatchPairs MatchPairs -> MatchPairs .
+  eq bracketEach( { I, IL' } MPs, MPs' ) = bracketEach( MPs, MPs' {I, [ IL']}) .
+  eq bracketEach( nopairs, MPs ) = MPs .
+  
+***
+*** Convert an item list, like X Y Z, to a name list,
+*** like X,Y,Z.
+***  
+  op itemListToNameList : ItemList -> NameList .
+  eq itemListToNameList(X IL) = X, itemListToNameList(IL) .
+  eq itemListToNameList(X) = X .
+  
+***
+*** Given an item, determine if it is an ellipses.
+***  
+  op isEllipses : Item -> Bool .
+  eq isEllipses(ellipses(N)) = true .
+  eq isEllipses(I) = false [owise] .
+  
+***
+*** Given an item, return the ellipses count in an ellipses
+*** item; other items just yield 0.
+***  
+  op ellipseLevel : Item -> Nat .
+  eq ellipseLevel(ellipses(N)) = N .
+  eq ellipseLevel(I) = 0 [owise] .
+
+***
+*** Given a term and a set of match pairs, determine which names in the
+*** match pairs set are in the term. 
+***
+  op pairsForTerm : Item MatchPairs -> MatchPairs .
+  eq pairsForTerm( X, { repVar(X,N), IL' } MPs) = { repVar(X,N), IL' } .
+  eq pairsForTerm( X, { patVar(X,N), IL' } MPs) = { patVar(X,N), IL' } .
+  eq pairsForTerm( [ X ], MPs) = pairsForTerm( X, MPs ) .
+  eq pairsForTerm( [ I IL ], MPs) = pairsForTerm( I, MPs) 
+     pairsForTerm( [ IL ], MPs) .
+  eq pairsForTerm( E, MPs ) = nopairs [owise] .
+  
+***
+*** Maintain "set-ness" of match pairs
+***
+  eq { I, IL } { I, IL } = { I, IL } .
+
+***
+*** Pick a specific item from the item list .
+***
+  op nth : ItemList Nat -> Item .
+  eq nth(I, 1) = I .
+  eq nth(I IL, 1) = I .
+  eq nth((I IL), N) = nth(IL, (_-_(N,1))) [owise] .
+  
+***
+*** Strip a layer of bracketing off a list to yield an item list
+***
+  op strip : Item -> ItemList .
+  eq strip( [ IL ] ) = IL .
+  eq strip( E ) = E [owise] .
+
+***
+*** Strip one level of list brackets off each item in a list
+***
+  op stripAll : ItemList -> ItemList .
+  eq stripAll(I IL) = strip(I) stripAll(IL) .
+  eq stripAll(I) = strip(I) .
+ 
+***
+*** Strip N levels off a list
+***
+  op stripAllN : ItemList Nat -> ItemList .
+  eq stripAllN(IL, 0) = IL .
+  eq stripAllN(IL, N) = stripAllN(stripAll(IL),(_-_(N,1))) [owise] .
+
+***
+*** Strip N levels off the lists in pairs
+***
+  op stripAllInPairsN : MatchPairs Nat -> MatchPairs .
+  eq stripAllInPairsN({ repVar(X,N), IL } MPs, N) 
+   = { repVar(X,N), stripAllN(IL,N) } stripAllInPairsN(MPs, N) .
+  eq stripAllInPairsN({ patVar(X,N), IL } MPs, N) 
+   = { patVar(X,N), stripAllN(IL,N) } stripAllInPairsN(MPs, N) .
+  eq stripAllInPairsN(MPs,N) = MPs [owise] .
+  
+***
+*** Provide an op for an empty item list
+***  
+  op noitems : -> ItemList .
+
+***
+*** Wrap an expression into an item list
+***
+  op wrap : Item -> Item .
+  eq wrap(I) = [ I ] .
+  
+***
+*** Wrap an expression in N list layers
+***
+  op wrapN : Item Nat -> Item .
+  eq wrapN(I,0) = I .
+  eq wrapN(I,N) = wrapN(wrap(I),(_-_(N,1))) [owise] .
+   
+***
+*** Given a set of match pairs, pick an item from each pair and strip a layer
+*** of the internal item list.
+***
+  op pairsNth : Nat MatchPairs -> MatchPairs .
+  eq pairsNth(N, { I, IL } MPs) = { I, strip(nth(IL,N)) } pairsNth(N, MPs) .
+  eq pairsNth(N, nopairs) = nopairs [owise] .
+  
+***
+*** Given a set of match pairs, find the one with the longest item list
+***
+  op maxLen : MatchPairs -> Nat .
+  eq maxLen( { I, IL } MPs) = max( ILLen(IL), maxLen(MPs) ) .
+  eq maxLen( nopairs ) = 0 .
+
+***
+*** Bump the count up on vars in the pattern
+***
+  op bump : List Nat -> List .
+  eq bump(Li,N) = bumpH(Li,[],N) .
+  
+  op bumpH : List List Nat -> List .
+  eq bumpH( [ repVar(X,N) IL ] , [], N' ) 
+   = bumpH( [ IL ], [ repVar(X,N + N') ], N' ) .
+  eq bumpH( [ patVar(X,N) IL ] , [], N' ) 
+   = bumpH( [ IL ], [ patVar(X,N + N') ], N' ) .
+  eq bumpH( [ repVar(X,N) ] , [], N' ) 
+   = bumpH( [], [ repVar(X,N + N') ], N' ) .
+  eq bumpH( [ patVar(X,N) ] , [], N' ) 
+   = bumpH( [], [ patVar(X,N + N') ], N' ) .
+  eq bumpH( [ repVar(X,N) IL ] , [ IL' ], N' ) 
+   = bumpH( [ IL ], [ IL' repVar(X,N + N') ], N' ) .
+  eq bumpH( [ patVar(X,N) IL ] , [ IL' ], N' ) 
+   = bumpH( [ IL ], [ IL' patVar(X,N + N') ], N' ) .
+  eq bumpH( [ repVar(X,N) ] , [ IL' ], N' ) 
+   = bumpH( [], [ IL' repVar(X,N + N') ], N' ) .
+  eq bumpH( [ patVar(X,N) ] , [ IL' ], N' ) 
+   = bumpH( [], [ IL' patVar(X,N + N') ], N' ) .
+
+  eq bumpH( [ repLst(Li,N) IL ] , [], N' ) 
+   = bumpH( [ IL ] , [ repLst(bump(Li,N'),N) ], N' ) .  
+  eq bumpH( [ repLst(Li,N) IL ] , [ IL' ], N' ) 
+   = bumpH( [ IL ] , [ IL' repLst(bump(Li,N'),N) ], N' ) .  
+  eq bumpH( [ repLst(Li,N) ] , [], N' ) 
+   = bumpH( [] , [ repLst(bump(Li,N'),N) ], N' ) .  
+  eq bumpH( [ repLst(Li,N) ] , [ IL' ], N' ) 
+   = bumpH( [] , [ IL' repLst(bump(Li,N'),N) ], N' ) .
+  
+  eq bumpH( [ Li IL ], [], N' ) = bumpH( [ IL ], [ bump(Li,N') ], N' ) .  
+  eq bumpH( [ Li IL ], [ IL' ], N' ) = bumpH( [ IL ], [ IL' bump(Li,N') ], N') .  
+  eq bumpH( [ Li ], [], N' ) = bumpH( [], [ bump(Li,N') ], N' ) .  
+  eq bumpH( [ Li ], [ IL' ], N' ) = bumpH( [], [ IL' bump(Li,N') ], N' ) .  
+  
+  eq bumpH( [ phName(X) IL ], [], N' ) = bumpH( [ IL ], [ phName(X) ], N' ) .
+  eq bumpH( [ phName(X) IL ], [ IL' ], N' ) 
+   = bumpH( [ IL ], [ IL' phName(X) ], N' ) .
+  eq bumpH( [ phName(X) ], [], N' ) = bumpH( [], [ phName(X) ], N' ) .
+  eq bumpH( [ phName(X) ], [ IL' ], N' ) = bumpH( [], [ IL' phName(X) ], N' ) .
+  
+  eq bumpH( [], Li, N) = Li .
+  
+***
+*** Reduce the count on vars in a match pair set
+***
+  op unbump : MatchPairs Nat -> MatchPairs .
+  eq unbump({ repVar(X,N), IL } MPs, N') 
+   = { repVar(X,(_-_(N,N'))), IL } unbump(MPs,N') .    
+  eq unbump({ patVar(X,N), IL } MPs, N') 
+   = { patVar(X,(_-_(N,N'))), IL } unbump(MPs,N') .
+  eq unbump(MPs, N) = MPs [owise] .
+endm
+
+*****************************************************************
+mod SEQ-COMP-SEMANTICS is
+  including GENERIC-EXP-SEMANTICS .
+  including DEFINE-SYNTAX-SEMANTICS .
+
+  vars EL EL' : ExpList .  var K : Computation .  var V : Value . 
+  var Mem : Store . var VL VL' VL'' : ValueList . var PLS : PLState . var E : Exp .
+  
+  eq k(valList(V) -> stop)  program(EL,EL') = k(transform(EL) -> stop)  program(EL') .
+  eq k(stop) program(EL,EL') = k(transform(EL) -> stop) program(EL') .
+
+  ***
+  *** handle begin from here on 
+  ***
+  op continue : -> ComputationItem .
+
+  ***
+  *** handle application of begin
+  ***
+  eq k(apply(mbuiltin('begin), V, VL) -> K) 
+    = k(valList(V) -> continue -> apply(mbuiltin('begin), VL) -> K) . 
+
+  ***
+  *** handle continue continuation item
+  *** if this is the last item in the begin list evalk it and pass the result 
+  *** to the continuation
+  ***
+  eq k(valList(V) -> continue -> apply(mbuiltin('begin), nill) -> K)  
+    = k(valList(V) -> evalk -> K) .
+  
+  ***
+  *** if, however, this is not the last item, evalk it and discard the result
+  ***
+  eq k(valList(V) -> continue -> K)  = k(valList(V) -> evalk -> discard -> K)  [owise] .
+
+   
+endm
+
+********************************************************************
+mod CALL/CC-SEMANTICS is
+  including EVAL-SEMANTICS .
+  including SEQ-COMP-SEMANTICS .
+
+  vars V V' : Value . var K K' K'' : Computation . var Mem : Store .
+  var KI : ComputationItem . vars Env Env' GEnv GEnv' : Env . var E : Exp .
+  var VL : ValueList .
+
+  ***
+  *** With the program PLStateAttribute this is the only equation we need
+  ***
+  eq k(apply(fbuiltin('call-with-current-continuation), V) -> K)  env(Env)
+   = k(apply(V, continuation(K, Env)) -> K)  env(Env) .
+
+
+  eq k(apply(continuation(K, Env'), V) -> K')  env(Env) globalenv(GEnv) 
+     = k(valList(V) -> K)  env(Env') globalenv(GEnv) .
+  
+  op consumer : Value -> ComputationItem .
+
+  ***
+  *** call-with-values evaluates the first argument as a function
+  *** passing the result to the second argument.  The
+  *** function values must be called for more than one value
+  *** to be passed (without using a list)
+  ***
+  eq k(apply(fbuiltin('call-with-values), V, V') -> K) 
+   = k(apply(V, (nill).ValueList) -> consumer(V') -> K) .
+
+  *** 
+  *** Handle a call to the function values
+  ***
+  eq k(apply(fbuiltin('values), VL) -> K)  = k(valList(vals(VL)) -> K) .
+  
+  ***
+  *** Handle values passed with values to consumer
+  ***
+  eq k(valList(vals(VL)) -> consumer(V') -> K)  = k(apply(V',VL) -> K) .
+
+  ***
+  *** Else handle single non-values value passed to consumer
+  ***
+  eq k(valList(V) -> consumer(V') -> K)  = k(apply(V',V) -> K)  [owise] .
+endm
+
+*****************************************************************
+mod LAMBDA-SEMANTICS is
+  including EVAL-SEMANTICS .
+
+  vars CA CB : ConsCell .  var K : Computation .
+  vars Env Env' GEnv : Env . var Mem : Store .
+  vars L1 L2 : Location . vars X X' : Name . vars XL XL' : NameList .
+  vars V V' : Value . vars VL VL' VB : ValueList . var N : Nat . var B : Bool .
+
+  eq k(apply(mbuiltin('lambda), V, VL) -> K) mem(Mem) env(Env)
+   = k(valList(fclosure(list2Names(V, Mem), VL, Env)) -> K) mem(Mem) env(Env) .
+
+  eq k(apply(fclosure(XL, &rest, X, VB, Env'), VL) -> K)  env(Env)  
+   = k(values2List(restN(VL, length(XL))) -> bindTo(X) 
+       -> valList(firstN(VL, length(XL))) -> bindTo(XL) 
+       -> body(VB) -> kenv(Env) -> K)  env(Env') . 
+
+  ***
+  *** add begin to the body of every closure as it is applied, as scheme
+  *** allows the body to be a list of expressions that are
+  *** evaulated as if in a begin list.
+  *** 
+  eq k(apply(fclosure(XL, VB, Env'), VL) -> K)  env(Env)   
+     = k(valList(VL) -> bindTo XL -> body(VB) -> kenv(Env) -> K)  
+     env(Env') [owise] .
+endm
+
+*****************************************************************
+mod IF-SEMANTICS is
+  including EVAL-SEMANTICS .
+  vars VC VThen VElse : Value . 
+  var K : Computation .  var Mem : Store .  var Env : Env .
+
+  op ifc : Value Value -> ComputationItem .
+
+  eq k(apply(mbuiltin('if), VC, VThen, VElse) -> K)  
+   = k(valList(VC) -> evalk -> ifc(VThen, VElse) -> K) .
+  
+  ***
+  *** the else form defaults to unspecified value if not provided
+  ***
+  eq k(apply(mbuiltin('if), VC, VThen) -> K)  
+   = k(valList(VC) -> evalk -> ifc(VThen, symbol(unspecified)) -> K) .
+
+  eq k(valList(VC) -> ifc(VThen, VElse) -> K) 
+   = k(valList(if  VC == symbol(#f) then VElse else VThen  fi) -> evalk -> K) .
+endm
+
+*****************************************************************
+mod COND-SEMANTICS is
+  including EVAL-SEMANTICS .
+  vars V V1 V2 : Value .  var VL : ValueList .  vars L1 L2 : Location .
+  var K : Computation .  var Mem : Store .  var Env : Env .
+
+  op condBody : Value -> ComputationItem .
+  op clause : Value -> ComputationItem .
+
+  ***
+  *** test each condition
+  ***
+  eq k(apply(mbuiltin('cond), V, VL) -> K)  
+   = k(clause(V) -> apply(mbuiltin('cond), VL) -> K) .
+  
+  ***
+  *** if no condition matches return unspecified value
+  ***
+  eq k(apply(mbuiltin('cond), nill) -> K)  
+   = k(valList(symbol(unspecified)) -> K) .
+
+  ***
+  *** evaluate a condition form
+  ***
+  eq k(clause(cell({L1 . L2})) -> apply(mbuiltin('cond), VL) -> K) mem(Mem) 
+   = k(valList(Mem[L1]) -> evalk -> condBody(Mem[L2]) -> apply(mbuiltin('cond), VL) -> K) 
+     mem(Mem) .
+
+  ***
+  *** if condition form evaluates to #f, advance to the next condition
+  ***
+  eq k(valList(symbol(#f)) -> condBody(V1) -> apply(mbuiltin('cond), VL) -> K) 
+   = k(apply(mbuiltin('cond), VL) -> K) .
+  
+  ***
+  *** if condition evaluates to non-#f and there is no body, return the 
+  *** condition value
+  ***
+  eq k(valList(V) -> condBody(symbol(nil)) -> apply(mbuiltin('cond), VL) -> K) 
+   = k(valList(V) -> K) .
+  
+  ***
+  *** otherwise the condition form evaluates to non-#f and there
+  *** is a body so evalute the body using evalnext in GENERIC-EXP-SEMANTICS
+  ***
+  eq k(valList(V) -> condBody(V1) -> apply(mbuiltin('cond), VL) -> K) mem(Mem) 
+   = k(body(list2Values(V1, Mem)) -> K) mem(Mem)  [owise] .
+endm
+
+******************************************************************
+mod VECTOR-OPERATIONS-SEMANTICS is
+  including EVAL-SEMANTICS .
+
+  var V : Value . var K : Computation . var N N' N'' : Nat .
+  var I : Int . var LA : LocationArray . var L L1 : Location .
+  var Mem : Store . 
+
+  ***
+  *** vector-set!
+  ***
+  eq k(apply(fbuiltin('vector-set!),vector([N ; L1] LA, N'), int(N), V) -> K) 
+   = k(valList(V) -> assignToLoc(L1) -> valList(symbol(unspecified)) -> K) .
+
+  ***
+  *** if N is not in the LocationArray we have an index out of range
+  ***
+  eq k(apply(fbuiltin('vector-set!),vector(LA, N'), int(I), V) -> K) 
+   = IndexOutOfRange(I) [owise] .
+
+  ***
+  *** vector-ref
+  ***
+  eq k(apply(fbuiltin('vector-ref), vector([N ; L] LA, N'), int(N)) -> K) 
+     mem(Mem)
+   = k(valList(Mem[L]) -> K) mem(Mem) .
+
+  ***
+  *** if N is not in the LocationArray we have an index out of range
+  ***
+  eq k(apply(fbuiltin('vector-ref), vector(LA, N'), int(I)) -> K) 
+     mem(Mem)
+   = IndexOutOfRange(I) mem(Mem) [owise] .
+  
+  ***
+  *** vector-length
+  ***
+  eq k(apply(fbuiltin('vector-length), vector(LA, N')) -> K) mem(Mem)
+   = k(valList(int(N')) -> K) mem(Mem) .
+
+  ***
+  *** make-vector
+  ***
+  op makeVector : Value Nat Nat -> ComputationItem .
+
+  eq k(apply(fbuiltin('make-vector), int(0), V) -> K)
+   = k(valList(symbol(nilVec)) -> K) .
+  eq k(apply(fbuiltin('make-vector), int(0)) -> K)
+   = k(valList(symbol(nilVec)) -> K) .
+
+  eq k(apply(fbuiltin('make-vector), int(I), V) -> K)
+   = k(makeVector(V, 0, I) -> K) [owise] .
+  eq k(apply(fbuiltin('make-vector), int(I)) -> K)
+   = k(makeVector(symbol(unspecified), 0, I) -> K) [owise] .
+  
+  eq k(makeVector(V, 0, N) -> K) nextLoc(N'') 
+   = k(valList(V) -> assignToLoc(loc(N'')) -> valList(vector([0 ; loc(N'')], N)) 
+       -> makeVector(V, 1, N) -> K) nextLoc(N'' + 1) . 
+  eq k(valList(vector(LA, N')) -> makeVector(V, N', N') -> K) nextLoc(N'')
+   = k(valList(vector(LA, N')) -> K) nextLoc(N'') .
+  eq k(valList(vector(LA, N')) -> makeVector(V, N, N')  -> K) nextLoc(N'') 
+   = k(valList(V) -> assignToLoc(loc(N'')) -> valList(vector(LA [N ; loc(N'')], N')) 
+       -> makeVector(V, N + 1, N') -> K) nextLoc(N'' + 1) [owise] .
+endm
+
+mod STRING-OPERATIONS-SEMANTICS is
+  including EVAL-SEMANTICS .
+
+  var V : Value . var K : Computation . var N N' N'' : Nat .
+  var I : Int . var LA : LocationArray . var Ch : Char .
+  var L L1 : Location . var Mem : Store .
+  
+  ***
+  *** string-set!, only different from vector-set! in that the value assigned
+  *** must be a char
+  ***
+  eq k(apply(fbuiltin('string-set!),string([N ; L1] LA, N'), int(N), char(Ch)) 
+     -> K) 
+   = k(valList(char(Ch)) -> assignToLoc(L1) -> valList(symbol(unspecified)) -> K) .
+
+  ***
+  *** if N is not in the LocationArray we have an index out of range
+  ***
+  eq k(apply(fbuiltin('string-set!),string(LA, N'), int(I), char(Ch)) 
+     -> K) 
+   = IndexOutOfRange(I) [owise] .
+
+  ***
+  *** string-ref
+  *** 
+  eq k(apply(fbuiltin('string-ref), string([N ; L] LA, N'), int(N)) -> K) 
+     mem(Mem)
+   = k(valList(Mem[L]) -> K) mem(Mem) .
+
+  ***
+  *** if N is not in the LocationArray we have an index out of range
+  ***
+  eq k(apply(fbuiltin('string-ref), string(LA, N'), int(I)) -> K) 
+     mem(Mem)
+   = IndexOutOfRange(I) mem(Mem) [owise] .
+
+  ***
+  *** string-length
+  ***
+  eq k(apply(fbuiltin('string-length), string(LA, N')) -> K) mem(Mem)
+   = k(valList(int(N')) -> K) mem(Mem) .
+
+  ***
+  *** make-string 
+  ***
+  op makeString : Value Nat Nat -> ComputationItem .
+
+  ***
+  *** this differs from make-vector only in that
+  *** the value must be a character
+  *** and that we use space instead of unspecified
+  ***
+
+  eq k(apply(fbuiltin('make-string), int(0), char(Ch)) -> K)
+   = k(valList(symbol(nilStr)) -> K) .
+  eq k(apply(fbuiltin('make-string), int(0)) -> K)
+   = k(valList(symbol(nilStr)) -> K) .
+
+  eq k(apply(fbuiltin('make-string), int(I), char(Ch)) -> K)
+   = k(makeString(char(Ch), 0, I) -> K) [owise] .
+  eq k(apply(fbuiltin('make-string), int(I)) -> K)
+   = k(makeString(char("\0"), 0, I) -> K) [owise] .
+  
+  eq k(makeString(V, 0, N) -> K) nextLoc(N'') 
+   = k(valList(V) -> assignToLoc(loc(N'')) -> valList(string([0 ; loc(N'')], N)) 
+       -> makeString(V, 1, N) -> K) 
+     nextLoc(N'' + 1) .
+  eq k(valList(string(LA, N')) -> makeString(V, N', N') -> K) nextLoc(N'')
+   = k(valList(string(LA, N')) -> K) nextLoc(N'') .
+  eq k(valList(string(LA, N')) -> makeString(V, N, N')  -> K) nextLoc(N'') 
+   = k(valList(V) -> assignToLoc(loc(N'')) -> valList(string(LA [N ; loc(N'')], N')) 
+       -> makeString(V, N + 1, N') -> K)
+     nextLoc(N'' + 1) [owise] .
+endm
+
+mod ENV-OPERATIONS-SEMANTICS is
+   including GENERIC-EXP-SEMANTICS .
+   vars Env Env' GEnv GEnv' : Env . var K : Computation .
+   var VL : ValueList . var XL : NameList .
+ 
+   eq k(apply(fbuiltin('current-environment)) -> K) env(Env) globalenv(GEnv)
+    = k(valList(environment(Env, GEnv)) -> K) env(Env) globalenv(GEnv) .
+
+   eq k(apply(fbuiltin('get-environment),fclosure(XL, VL, Env)) -> K) globalenv(GEnv)
+    = k(valList(environment(Env, GEnv)) -> K) globalenv(GEnv) .
+ 
+   eq k(apply(fbuiltin('k-scheme-environment)) -> K)
+    = k(valList(symbol('k-scheme-env)) -> evalk -> K) .
+endm
+
+mod DO-SEMANTICS is
+  including GENERIC-EXP-SEMANTICS .
+  var K : Computation . var Mem : Store .
+  var C1 C2 : ConsCell . var V V1 V2 V3 : Value .
+  var VL VL1 VL2 : ValueList . var X : Name .
+  var BL : BinderList . var Env : Env .
+  var XL : NameList .
+
+  sorts Binder BinderList .
+  subsort Binder < BinderList .
+
+  op [_/_] : Name Value -> Binder .
+  op nill : -> Binder .
+  op __ : BinderList BinderList -> BinderList [assoc comm id: nill] .
+  op bindValues : ValueList  -> ComputationItem .
+  op bind : Value -> ComputationItem .
+  op bindName : Name -> ComputationItem .
+  op rebind : BinderList -> ComputationItem .
+  op initBind : NameList ValueList -> ComputationItem .
+  op rebindNow : NameList BinderList -> ComputationItem .
+  op res : Value -> ComputationItem .
+  op test : -> ComputationItem .
+  op test : Value -> ComputationItem .
+  op effects : Value -> ComputationItem .
+
+  eq k(apply(mbuiltin('do),cell(C1),cell(C2),V) -> K) mem(Mem) env(Env)
+   = k(bindValues(list2Values(cell(C1), Mem)) -> valList(list2Values(cell(C2), Mem)) 
+   -> test -> effects(V) -> kenv(Env) -> K) mem(Mem) env(Env) .
+
+  eq k(apply(mbuiltin('do),cell(C1),cell(C2)) -> K) mem(Mem) env(Env)
+   = k(bindValues(list2Values(cell(C1), Mem)) -> valList(list2Values(cell(C2), Mem)) 
+       -> test -> effects(symbol(unspecified)) -> kenv(Env) -> K) 
+     mem(Mem) env(Env) .
+
+
+  eq k(bindValues(V, VL) -> K) mem(Mem) 
+   = k(bind(list2Values(V, Mem)) -> initBind((),nill) 
+       -> rebind(nill) -> bindValues(VL) -> K) mem(Mem) .
+
+  ***
+  *** with rebind
+  ***
+  eq k(initBind(XL, VL1) -> rebind(BL) -> bindValues(V, VL2) -> K) mem(Mem) 
+   = k(bind(list2Values(V, Mem)) -> initBind(XL,VL1) 
+     -> rebind(BL) -> bindValues(VL2) -> K) mem(Mem) .
+
+  eq k(initBind(XL, VL) -> rebind(BL) -> bindValues(nill) -> K) mem(Mem)
+   = k(valList(VL) -> bindTo(XL) -> rebind(BL) -> K) mem(Mem) . 
+
+
+  eq k(bind(symbol(X), V1, V2) -> initBind(XL, VL) -> rebind(BL) -> K)
+   = k(valList(V1) -> evalk ->  bindName(X) -> initBind(XL,VL) 
+       -> rebind(BL [X / V2]) -> K) .
+ 
+  eq k(bind(symbol(X), V) -> initBind(XL, VL) -> rebind(BL) -> K) 
+   = k(valList(V) -> evalk -> bindName(X) -> initBind(XL, VL) 
+       -> rebind(BL [ X / symbol(X)]) -> K) .
+ 
+  eq k(valList(V) -> bindName(X) -> initBind(XL, VL) -> rebind(BL) -> K) 
+   = k(initBind((XL, X), (VL, V)) -> rebind(BL) -> K) .
+
+  eq k(rebind(BL) -> valList(V1, nill) -> test -> effects(V2) -> K)
+   = k(rebind(BL) -> test(V1) -> res(symbol(unspecified)) 
+       -> effects(V2) -> K) .
+
+  eq k(rebind(BL) -> valList(V1, VL) -> test -> effects(V2) -> K)
+   = k(rebind(BL) -> test(V1) -> res(VL) -> effects(V2) -> K) [owise] .
+
+  ***
+  *** finally do an iteration
+  ***
+  eq k(rebind(BL) -> test(V1) -> res(V2) -> effects(V3) -> K)
+   = k(valList(V1) -> evalk -> rebind(BL) -> test(V1) -> res(V2) -> effects(V3) -> K) .
+
+  ***
+  *** if the test evaluates to non-#f evalute res, make sure apply body
+  ***
+  eq k(valList(V) -> rebind(BL) -> test(V1) -> res(V2) -> effects(V3) -> K)
+   = k(body(V2) -> K) [owise] .
+
+  ***
+  *** if the test evaluates to #f we need to execute the effects and
+  *** rebind the rebinders, rebindNow will rebind the binders
+  ***
+  eq k(valList(symbol(#f)) -> rebind(BL) -> test(V1) -> res(V2) -> effects(V3) -> K)
+   = k(body(V3) -> discard -> rebindNow((), BL) ->
+       rebind(BL) -> test(V1) -> res(V2) -> effects(V3) -> K) .
+  
+  ***
+  *** do must have at least one binder, makes life easier
+  ***
+  eq k(rebindNow((), [X / V] BL) -> K)
+   = k(valList(V) -> evalk -> rebindNow(X, BL) -> K) .
+
+  eq k(valList(VL) -> rebindNow(XL, [X / V] BL) -> K)
+   = k(valList(V) -> evalk -> valList(VL) -> rebindNow((XL, X), BL) -> K) . 
+
+  eq k(valList(VL) -> rebindNow(XL, nill) -> K)
+   = k(valList(VL) -> bindTo(XL) -> K) .
+endm
+
+mod R5RS-SEMANTICS is
+  including K-SCHEME-SYNTAX .
+  including GENERIC-EXP-SEMANTICS .
+  including QUOTE-SEMANTICS .
+  including ARITHMETIC-EXP-SEMANTICS .
+  including BOOLEAN-EXP-SEMANTICS .
+  including DEFINE-SEMANTICS .
+  including SET!-SEMANTICS .
+  including LIST-OPERATIONS-SEMANTICS .
+  including CONS-SEMANTICS .
+  including SEQ-COMP-SEMANTICS .
+  including IF-SEMANTICS .
+  including PREDICATE-SEMANTICS .
+  including LAMBDA-SEMANTICS .
+  including CALL/CC-SEMANTICS .
+  including VECTOR-OPERATIONS-SEMANTICS .
+  including STRING-OPERATIONS-SEMANTICS .
+endm
+
+*****************************************************************
+mod K-SCHEME-SEMANTICS is
+  including R5RS-SEMANTICS .
+  including EQ-PREDICATE-SEMANTICS .
+  including APPEND-SEMANTICS .
+  including DISPLAY-SEMANTICS .
+  including LET-SEMANTICS .
+  including LET*-SEMANTICS .
+  including LETREC-SEMANTICS .
+  including COND-SEMANTICS .
+  including ENV-OPERATIONS-SEMANTICS .
+  including APPLY-SEMANTICS .
+  including DO-SEMANTICS .
+  including DEFINE-SYNTAX-SEMANTICS .
+
+  op run_ : Exp -> [Output] .
+  op [_] : PLState -> [Output] .
+
+  var EL : ExpList .  var V : Value .  var S : PLState .  var O : Output .
+  var Mem : Store . var X : Name . var I : Int . var Str : String . 
+  var LA : LocationArray . var N : Nat .  var Ch : Char . var C : ConsCell .
+  var Env GEnv : Env .
+  eq run(EL) = [k(stop) mem(empty) program(EL)
+                 globalenv(empty) env(empty) synmap(empty)
+                 fbuiltins('+,'-,'*,'/,'append,'car,'cdr,
+                           'cons,'eval,'expt,'apply,
+                           'call-with-current-continuation,
+                           'call-with-values,'list,'display,
+                           'set-car!,'set-cdr!,'vector-set!,
+                           'vector-ref,'vector-length,
+                           'string-set!,'string-ref,
+                           'string-length,'values,
+                           'current-environment,
+                           'current-global-environment,
+                           'get-environment,
+                           'k-scheme-environment,
+                           'null?,'eqv?,'eq?,'equal?,
+                           'boolean?,'symbol?,'char?,
+                           'vector?,'procedure?,
+                           'pair?,'number?,'string?,
+                           'not,'=,'/=,'<,'>,'<=,'>=,
+                           'make-vector, 'make-string)
+                 mbuiltins('if,'cond,'define,'do,'begin,
+                           'lambda,'let,'let*,'letrec,
+                           'quote,'quasiquote,'set!,
+                           'and,'or,'defmacro,'delay,
+                           'define-syntax,'syntax-rules,
+                           'let-syntax,'letrec-syntax) 
+                 unquotes(nill)
+                 nextLoc(1) output(none)] .
+  eq [k(expList(()) -> stop)  program(()) output(O) S] = O .
+  eq [WrongTypeToApply(int(I)) S] = "Wrong type to apply, int" .
+  eq [WrongTypeToApply(char(Ch)) S] = "Wrong type to apply, char" .
+  eq [WrongTypeToApply(symbol(X)) S] = "Wrong type to apply, symbol" .
+  eq [WrongTypeToApply(cell(C)) S] = "Wrong type to apply, pair" .
+  eq [WrongTypeToApply(vector(LA,N)) S] = "Wrong type to apply, vector" .
+  eq [WrongTypeToApply(string(LA,N)) S] = "Wrong type to apply, string" .
+  eq [WrongTypeToApply(environment(Env, GEnv)) S] = "Wrong type to apply, environment" .
+  eq [UnboundVariable(X) S] = "Unbound variable: " + Name2String(X) . 
+  eq [WrongNumberOfArgs S] = "Wrong number of arguments" .
+  eq [IndexOutOfRange(I) S] = "Index out of range: " + inttoDisplayout(I) . 
+  eq [CannotBindSyntax S] = "Cannnot bind or assign syntactic keywords" .
+endm

@@ -1,0 +1,1 @@
+(display (call-with-values * -))
